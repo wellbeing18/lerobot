@@ -87,7 +87,7 @@ class PI05Config(PreTrainedConfig):
     scheduler_decay_steps: int = 30_000
     scheduler_decay_lr: float = 2.5e-6
 
-    tokenizer_max_length: int = 200  # see openpi `__post_init__`
+    # Note: tokenizer_max_length is defined above (line 54), removed duplicate here
 
     def __post_init__(self):
         super().__post_init__()
