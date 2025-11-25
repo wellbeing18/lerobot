@@ -67,6 +67,12 @@ class PI05Config(PreTrainedConfig):
     compile_mode: str = "max-autotune"  # Torch compile mode
     device: str | None = None  # Device to use for the model (None = auto-detect)
 
+    # LoRA configuration (adapted from GR00T policy for memory-efficient finetuning)
+    use_lora: bool = False  # Enable LoRA (Low-Rank Adaptation) for finetuning
+    lora_rank: int = 16  # Rank for LoRA adapters (NVIDIA recommends 16 for 24GB VRAM)
+    lora_alpha: int = 32  # Alpha parameter for LoRA (typically 2 * rank)
+    lora_dropout: float = 0.1  # Dropout rate for LoRA layers
+
     # Optimizer settings: see openpi `AdamW`
     optimizer_lr: float = 2.5e-5  # see openpi `CosineDecaySchedule: peak_lr`
     optimizer_betas: tuple[float, float] = (0.9, 0.95)

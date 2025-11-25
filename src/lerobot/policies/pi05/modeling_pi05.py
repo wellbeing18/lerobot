@@ -27,6 +27,13 @@ from torch import Tensor, nn
 
 from lerobot.utils.import_utils import _transformers_available
 
+# PEFT imports for LoRA support
+try:
+    from peft import LoraConfig, get_peft_model
+    _peft_available = True
+except ImportError:
+    _peft_available = False
+
 # Conditional import for type checking and lazy loading
 if TYPE_CHECKING or _transformers_available:
     from transformers.models.auto import CONFIG_MAPPING
@@ -530,6 +537,11 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             torch.set_float32_matmul_precision("high")
             self.sample_actions = torch.compile(self.sample_actions, mode=config.compile_mode)
 
+        # Note: LoRA is NOT applied here during __init__
+        # It should be applied AFTER pretrained weights are loaded in from_pretrained()
+        # This ensures the state dict keys match (base model keys, not PEFT-wrapped keys)
+        self._lora_applied = False
+
         msg = """An incorrect transformer version is used, please create an issue on https://github.com/huggingface/lerobot/issues"""
 
         try:
@@ -555,6 +567,95 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = False
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
         logging.info("Disabled gradient checkpointing for PI05Pytorch model")
+
+    def _apply_lora(self):
+        """
+        Apply LoRA (Low-Rank Adaptation) to PaliGemma language model and Action Expert.
+
+        This method wraps the transformer models with PEFT LoRA adapters for memory-efficient
+        finetuning. LoRA reduces trainable parameters from 4B to ~40M (1%), enabling training
+        on 24GB VRAM.
+
+        Adapted from GR00T policy implementation in LeRobot.
+        """
+        if not _peft_available:
+            raise ImportError(
+                "PEFT library is required for LoRA support. Install with: pip install peft"
+            )
+
+        logging.info(
+            f"Applying LoRA to Pi0.5: rank={self.config.lora_rank}, "
+            f"alpha={self.config.lora_alpha}, dropout={self.config.lora_dropout}"
+        )
+
+        # LoRA configuration for transformer attention and MLP layers
+        # Note: task_type=None because we're wrapping GemmaModel (base transformer),
+        # not GemmaForCausalLM which would have prepare_inputs_for_generation
+        lora_config = LoraConfig(
+            r=self.config.lora_rank,
+            lora_alpha=self.config.lora_alpha,
+            lora_dropout=self.config.lora_dropout,
+            target_modules=[
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+                "self_attn.o_proj",
+                "mlp.gate_proj",
+                "mlp.up_proj",
+                "mlp.down_proj",
+            ],
+        )
+
+        # Apply LoRA to PaliGemma language model
+        # Note: paligemma.language_model is a read-only property returning self.model.language_model
+        # So we need to wrap paligemma.model.language_model directly
+        logging.info("Wrapping PaliGemma language model with LoRA adapters...")
+
+        # Temporarily disable gradient checkpointing on the submodule to prevent PEFT
+        # from trying to call enable_input_require_grads (we handle checkpointing at PI05 level)
+        lang_model = self.paligemma_with_expert.paligemma.model.language_model
+        lang_gc_enabled = getattr(lang_model, 'gradient_checkpointing', False)
+        if lang_gc_enabled:
+            lang_model.gradient_checkpointing = False
+
+        peft_lang_model = get_peft_model(lang_model, lora_config)
+        self.paligemma_with_expert.paligemma.model.language_model = peft_lang_model
+
+        # Re-enable checkpointing if it was enabled
+        if lang_gc_enabled:
+            peft_lang_model.gradient_checkpointing = True
+
+        peft_lang_model.print_trainable_parameters()
+
+        # Apply LoRA to Action Expert (Gemma)
+        # Note: gemma_expert.model has embed_tokens=None, so PEFT's enable_input_require_grads fails
+        # We disable gradient checkpointing on the submodule before wrapping
+        logging.info("Wrapping Action Expert (Gemma) with LoRA adapters...")
+
+        expert_model = self.paligemma_with_expert.gemma_expert.model
+        expert_gc_enabled = getattr(expert_model, 'gradient_checkpointing', False)
+        if expert_gc_enabled:
+            expert_model.gradient_checkpointing = False
+
+        peft_expert_model = get_peft_model(expert_model, lora_config)
+        self.paligemma_with_expert.gemma_expert.model = peft_expert_model
+
+        # Re-enable checkpointing if it was enabled
+        if expert_gc_enabled:
+            peft_expert_model.gradient_checkpointing = True
+
+        peft_expert_model.print_trainable_parameters()
+
+        logging.info("✅ LoRA successfully applied to Pi0.5 model")
+        self._lora_applied = True
+
+    def apply_lora_if_enabled(self):
+        """
+        Apply LoRA to the model if enabled in config and not already applied.
+        This should be called AFTER loading pretrained weights.
+        """
+        if self.config.use_lora and self.config.lora_rank > 0 and not self._lora_applied:
+            self._apply_lora()
 
     def _apply_checkpoint(self, func, *args, **kwargs):
         """Helper method to apply gradient checkpointing if enabled."""
@@ -968,6 +1069,10 @@ class PI05Policy(PreTrainedPolicy):
 
         except Exception as e:
             print(f"Warning: Could not remap state dict keys: {e}")
+
+        # Apply LoRA AFTER loading pretrained weights
+        # This ensures the base model has correct weights before PEFT wrapping
+        model.model.apply_lora_if_enabled()
 
         return model
 
