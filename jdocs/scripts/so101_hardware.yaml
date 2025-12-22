@@ -1,0 +1,44 @@
+# Hardware configuration for SO101 ACT inference
+# Derived from dataset config at: /home/jrobot/project/XLeRobot/datasets/left/pick_and_place/meta/config.yaml
+
+robot:
+  type: so101_follower
+  port: /dev/ttyACM1
+  id: xlerobot_left_arm
+  use_degrees: true
+
+cameras:
+  head:
+    type: opencv
+    index_or_path: 4
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
+  left_wrist:
+    type: opencv
+    index_or_path: 6
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
+
+inference:
+  # Action horizon: how many actions the model predicts at once
+  # ACT uses chunk_size (default 100), but we re-infer more frequently
+  action_horizon: 100
+  # Control frequency (30 Hz)
+  action_interval: 0.033
+  # Maximum episode duration in seconds
+  default_duration: 60
+  # Device for inference
+  device: cuda
+
+# Joint names for reference (order matters for action vector)
+joints:
+  - shoulder_pan.pos
+  - shoulder_lift.pos
+  - elbow_flex.pos
+  - wrist_flex.pos
+  - wrist_roll.pos
+  - gripper.pos
