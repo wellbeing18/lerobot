@@ -44,6 +44,10 @@ export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 # Suppress all UserWarning, FutureWarning, DeprecationWarning (propagates to worker processes)
 export PYTHONWARNINGS="ignore::UserWarning,ignore::FutureWarning,ignore::DeprecationWarning"
 
+# Disable tokenizers parallelism to avoid fork warnings
+# (tokenizers auto-disables after fork anyway, this just suppresses the warning)
+export TOKENIZERS_PARALLELISM=false
+
 # Change to project root (required for relative paths)
 cd "${PROJECT_ROOT}"
 
