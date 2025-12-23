@@ -1,15 +1,104 @@
 # Real-Time Chunking (RTC) Inference Guide
 
-This guide explains Real-Time Chunking (RTC), a technique for smooth robot control with action-chunking policies like SmolVLA and ACT.
+This guide explains Real-Time Chunking (RTC), a technique for smooth robot control with **flow-matching** action-chunking policies like SmolVLA and Pi0.
 
 ## Table of Contents
-1. [The Problem: Jerky Motion](#the-problem-jerky-motion)
-2. [How RTC Solves It](#how-rtc-solves-it)
-3. [Visual Comparison](#visual-comparison)
-4. [Walking Example](#walking-example)
-5. [RTC vs Async Inference](#rtc-vs-async-inference)
-6. [Implementation Guide](#implementation-guide)
-7. [When to Use What](#when-to-use-what)
+1. [Flow Matching vs Diffusion Policies](#flow-matching-vs-diffusion-policies)
+2. [Policy Compatibility](#policy-compatibility)
+3. [The Problem: Jerky Motion](#the-problem-jerky-motion)
+4. [How RTC Solves It](#how-rtc-solves-it)
+5. [Visual Comparison](#visual-comparison)
+6. [Walking Example](#walking-example)
+7. [RTC vs Async Inference](#rtc-vs-async-inference)
+8. [Implementation Guide](#implementation-guide)
+9. [When to Use What](#when-to-use-what)
+
+---
+
+## Flow Matching vs Diffusion Policies
+
+**RTC only works with flow-matching policies.** Understanding the difference is crucial:
+
+### Core Difference
+
+| Aspect | Diffusion | Flow Matching |
+|--------|-----------|---------------|
+| **Process** | Iterative denoising (many small steps) | Direct ODE trajectory (fewer steps) |
+| **Math** | Score matching, Markov chain | Continuous Normalizing Flows (CNF) |
+| **Steps needed** | 50-1000 (slow) | 5-20 (fast) |
+| **Training** | Predict noise at each step | Predict velocity field |
+| **Inference** | DDPM/DDIM sampling | ODE solver (Euler, RK4) |
+| **RTC Compatible** | No | **Yes** |
+
+### Visual Intuition
+
+```
+DIFFUSION (many small jumps):
+Noise ○···○···○···○···○···○···○···○···○···○ Action
+      ↑   ↑   ↑   ↑   ↑   ↑   ↑   ↑   ↑   ↑
+      t=T t=0.9T ... ... ... ... ... ... t=0
+      (100+ denoising steps, fixed process)
+
+FLOW MATCHING (direct path):
+Noise ○────────────────────────────────────○ Action
+      ↑                                     ↑
+      t=0                                  t=1
+      (learns straight-line flow, 5-10 steps)
+      ↑
+      Can be GUIDED mid-flow! (RTC)
+```
+
+### Why Flow Matching Enables RTC
+
+Flow matching learns a **continuous velocity field** that can be modified during inference:
+- At any point in the flow, you can inject constraints
+- RTC adds: "first N actions must match previous chunk"
+- The flow adjusts to satisfy this constraint → smooth blending
+
+Diffusion uses a **fixed Markov chain** that's harder to modify mid-process.
+
+---
+
+## Policy Compatibility
+
+### Model Categorization
+
+| Model | Type | RTC Support | Notes |
+|-------|------|-------------|-------|
+| **SmolVLA** | Flow Matching | **Yes** | Fast inference (10 steps), recommended for RTC |
+| **Pi0 / Pi0.5** | Flow Matching | **Yes** | Physical Intelligence, very fast |
+| **xVLA** | Diffusion | No | Uses `num_denoising_steps`, soft prompts |
+| **GROOT (GR00T)** | Diffusion | No | NVIDIA foundation model |
+| **Diffusion Policy** | Diffusion | No | Original DDPM-based robot policy |
+| **ACT** | VAE | No | Variational autoencoder, no denoising |
+
+### Performance Comparison
+
+```
+                    Speed           Quality         RTC Support
+Flow Matching       ★★★★★           ★★★★☆           ✅
+Diffusion           ★★☆☆☆           ★★★★★           ❌
+VAE (ACT)           ★★★★★           ★★★☆☆           ❌
+```
+
+### Choosing the Right Policy
+
+| If you want... | Use | RTC? |
+|----------------|-----|------|
+| Fastest inference + smooth motion | **SmolVLA**, **Pi0.5** | Yes |
+| Multi-embodiment / cross-robot | **xVLA** (soft prompts) | No |
+| Simple, proven, fast training | **ACT** | No |
+| NVIDIA ecosystem | **GROOT** | No |
+| Highest quality (slow OK) | **Diffusion Policy** | No |
+
+### What If My Policy Doesn't Support RTC?
+
+For non-flow-matching policies, alternatives for smooth motion:
+
+1. **Smaller chunk sizes** - More frequent re-planning (e.g., chunk_size=16)
+2. **Async inference** - Overlap prediction with execution
+3. **Action interpolation** - Manually blend between chunks (less effective)
+4. **Higher control rate** - Execute faster to reduce perceived jerk
 
 ---
 
@@ -375,27 +464,50 @@ while running:
 
 ### Quick Reference
 
-| Scenario | Recommendation |
-|----------|----------------|
-| SmolVLA on RTX 3090/4090/5090 | RTC alone |
-| ACT on mid-range GPU | RTC alone |
-| Diffusion Policy (slow) | Async + RTC |
-| GPU on cloud/server | Async + RTC |
-| Raspberry Pi client | Async required |
-| Demo/testing | Standard is fine |
+| Scenario | Policy Type | Recommendation |
+|----------|-------------|----------------|
+| SmolVLA on RTX 3090/4090/5090 | Flow Matching | **RTC alone** |
+| Pi0.5 on fast GPU | Flow Matching | **RTC alone** |
+| xVLA (any GPU) | Diffusion | Async or smaller chunks |
+| GROOT (any GPU) | Diffusion | Async or smaller chunks |
+| ACT on mid-range GPU | VAE | Standard (already fast) |
+| Diffusion Policy (slow) | Diffusion | Async (RTC not available) |
+| GPU on cloud/server | Any | Async (+RTC if flow matching) |
+| Raspberry Pi client | Any | Async required |
+| Demo/testing | Any | Standard is fine |
 
 ---
 
 ## Summary
 
+### Method Comparison
+
 | Method | Pros | Cons |
 |--------|------|------|
 | **Standard** | Simple, no overhead | Jerky, idle frames |
 | **Async** | Handles latency, distributed | Complex setup, still jerky |
-| **RTC** | Smooth motion, simple API | Requires flow-matching policy |
-| **Async + RTC** | Best of both worlds | Most complex |
+| **RTC** | Smooth motion, simple API | **Flow-matching only** (SmolVLA, Pi0) |
+| **Async + RTC** | Best of both worlds | Most complex, flow-matching only |
 
-**Bottom Line:**
-- For SmolVLA on a decent GPU → **Use RTC** (`infer_smolvla_rtc.py`)
-- For distributed setups → **Use Async + RTC**
-- For quick tests → **Standard is fine** (`infer_smolvla_so101.py`)
+### Policy Type Summary
+
+| Policy Type | Examples | Best Smoothing Strategy |
+|-------------|----------|------------------------|
+| **Flow Matching** | SmolVLA, Pi0, Pi0.5 | **RTC** (guided denoising) |
+| **Diffusion** | xVLA, GROOT, Diffusion Policy | Async + smaller chunks |
+| **VAE** | ACT | Standard (already smooth enough) |
+
+### Bottom Line
+
+**Flow Matching Policies (SmolVLA, Pi0):**
+- Use **RTC** for smooth motion → `infer_smolvla_rtc.py`
+- Add **Async** for distributed setups
+
+**Diffusion Policies (xVLA, GROOT):**
+- RTC **not available**
+- Use **smaller chunk sizes** (16-32) for more frequent re-planning
+- Use **Async** for slow inference or distributed setups
+
+**VAE Policies (ACT):**
+- Usually smooth enough without RTC
+- Standard inference is fine
