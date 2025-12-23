@@ -1,24 +1,30 @@
 #!/bin/bash
 # =============================================================================
-# ACT Training Script for SO101 Pick and Place
+# SmolVLA Training Script for SO101 Pick and Place
 # =============================================================================
 #
-# This script trains an ACT (Action Chunking with Transformers) policy on the
+# This script fine-tunes SmolVLA (Small Vision-Language-Action Model) on the
 # pick_and_place dataset using LeRobot's training infrastructure.
 #
+# SmolVLA is a lightweight VLA foundation model that takes images, robot state,
+# and language instructions to predict actions via flow matching.
+#
 # Usage:
-#   # Fresh training with defaults
-#   bash train_act_pickplace.sh
+#   # Fresh training with defaults (20k steps)
+#   bash train_smolvla_pickplace.sh
 #
 #   # Custom training steps and batch size
-#   MAX_STEPS=50000 BATCH_SIZE=16 bash train_act_pickplace.sh
+#   MAX_STEPS=30000 BATCH_SIZE=32 bash train_smolvla_pickplace.sh
 #
-#   # Resume from checkpoint (same max_steps)
-#   RESUME_FROM=outputs/act_pickplace/checkpoints/010000/pretrained_model bash train_act_pickplace.sh
+#   # Resume from checkpoint
+#   RESUME_FROM=outputs/smolvla_pickplace_*/checkpoints/010000/pretrained_model \
+#     bash train_smolvla_pickplace.sh
 #
-#   # Extended training beyond original max_steps (use constant LR)
-#   RESUME_FROM=outputs/act_pickplace/checkpoints/010000/pretrained_model \
-#     MAX_STEPS=150000 bash train_act_pickplace.sh
+# Key differences from ACT:
+#   - Uses pretrained VLM backbone (smolvla_base)
+#   - Requires task/language description in dataset
+#   - Uses cosine decay with warmup scheduler
+#   - Flow matching instead of VAE for action generation
 #
 # =============================================================================
 
@@ -41,10 +47,6 @@ export PYTHONWARNINGS="ignore::UserWarning,ignore::FutureWarning,ignore::Depreca
 # Change to project root (required for relative paths)
 cd "${PROJECT_ROOT}"
 
-echo "Project root: ${PROJECT_ROOT}"
-echo "PYTHONPATH: ${PYTHONPATH}"
-echo ""
-
 # =============================================================================
 # Configuration (Override via environment variables)
 # =============================================================================
@@ -53,42 +55,46 @@ echo ""
 DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets/pick_and_place}"
 DATASET_NAME="${DATASET_NAME:-pick_and_place}"
 
+# Camera name mapping (dataset → SmolVLA expected names)
+# SmolVLA base expects: camera1, camera2, camera3
+# Our dataset has: head, left_wrist
+
+# Pretrained Model
+# Use HuggingFace model ID or local path
+PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/smolvla_base}"
+
 # Training Hyperparameters
-MAX_STEPS="${MAX_STEPS:-100000}"
+# SmolVLA paper recommends 20k steps for ~50 episodes
+MAX_STEPS="${MAX_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 SEED="${SEED:-1000}"
 
-# ACT Architecture
-CHUNK_SIZE="${CHUNK_SIZE:-100}"
-N_ACTION_STEPS="${N_ACTION_STEPS:-100}"
-DIM_MODEL="${DIM_MODEL:-512}"
-N_HEADS="${N_HEADS:-8}"
-DIM_FEEDFORWARD="${DIM_FEEDFORWARD:-3200}"
-N_ENCODER_LAYERS="${N_ENCODER_LAYERS:-4}"
-N_DECODER_LAYERS="${N_DECODER_LAYERS:-1}"
-LATENT_DIM="${LATENT_DIM:-32}"
-DROPOUT="${DROPOUT:-0.1}"
+# SmolVLA Architecture (most should stay at defaults)
+CHUNK_SIZE="${CHUNK_SIZE:-50}"
+N_ACTION_STEPS="${N_ACTION_STEPS:-50}"
+NUM_STEPS="${NUM_STEPS:-10}"  # Flow matching denoising steps
 
-# VAE Configuration
-USE_VAE="${USE_VAE:-true}"
-KL_WEIGHT="${KL_WEIGHT:-10.0}"
+# Fine-tuning Strategy (recommended to keep defaults)
+FREEZE_VISION="${FREEZE_VISION:-true}"
+TRAIN_EXPERT_ONLY="${TRAIN_EXPERT_ONLY:-true}"
+TRAIN_STATE_PROJ="${TRAIN_STATE_PROJ:-true}"
 
-# Vision Backbone
-VISION_BACKBONE="${VISION_BACKBONE:-resnet18}"
-PRETRAINED_BACKBONE="${PRETRAINED_BACKBONE:-ResNet18_Weights.IMAGENET1K_V1}"
-
-# Optimizer
-LEARNING_RATE="${LEARNING_RATE:-1e-5}"
-LR_BACKBONE="${LR_BACKBONE:-1e-5}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+# Optimizer (SmolVLA uses different defaults than ACT)
+LEARNING_RATE="${LEARNING_RATE:-1e-4}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-10}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-10.0}"
 
+# Scheduler (cosine decay with warmup)
+WARMUP_STEPS="${WARMUP_STEPS:-1000}"
+DECAY_STEPS="${DECAY_STEPS:-30000}"
+DECAY_LR="${DECAY_LR:-2.5e-6}"
+
 # Checkpointing
-SAVE_STEPS="${SAVE_STEPS:-10000}"
-LOG_FREQ="${LOG_FREQ:-200}"
+SAVE_STEPS="${SAVE_STEPS:-5000}"
+LOG_FREQ="${LOG_FREQ:-100}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR="${OUTPUT_DIR:-outputs/act_pickplace_${TIMESTAMP}}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/smolvla_pickplace_${TIMESTAMP}}"
 
 # Device
 DEVICE="${DEVICE:-cuda}"
@@ -122,13 +128,11 @@ if [ -n "${RESUME_FROM}" ]; then
         exit 1
     fi
 
-    echo "Resuming from: ${RESUME_FROM}"
     RESUME_FLAG="--resume --config_path=${RESUME_FROM}/train_config.json"
 
     # Use the checkpoint's output directory
     CHECKPOINT_DIR=$(dirname "$(dirname "${RESUME_FROM}")")
     OUTPUT_DIR="${CHECKPOINT_DIR}"
-    echo "Using output directory: ${OUTPUT_DIR}"
 fi
 
 # =============================================================================
@@ -150,15 +154,17 @@ log() {
 
 # Start logging
 log "=============================================="
-log "ACT Training for Pick and Place"
+log "SmolVLA Training for Pick and Place"
 log "=============================================="
 log ""
 log "Configuration:"
+log "  Pretrained:     ${PRETRAINED_MODEL}"
 log "  Dataset:        ${DATASET_PATH}"
 log "  Max Steps:      ${MAX_STEPS}"
 log "  Batch Size:     ${BATCH_SIZE}"
 log "  Learning Rate:  ${LEARNING_RATE}"
 log "  Chunk Size:     ${CHUNK_SIZE}"
+log "  Warmup Steps:   ${WARMUP_STEPS}"
 log "  Output Dir:     ${OUTPUT_DIR}"
 log ""
 log "Training started at $(date)"
@@ -166,29 +172,26 @@ log "Log file: ${LOG_FILE}"
 log ""
 
 # Build the training command
+# Note: SmolVLA uses --policy.path for pretrained model instead of --policy.type
 # Use -W flags to suppress all UserWarnings and FutureWarnings
 CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning -m lerobot.scripts.lerobot_train \
     --dataset.repo_id=${DATASET_NAME} \
     --dataset.root=${DATASET_PATH} \
     --dataset.video_backend=pyav \
-    --policy.type=act \
+    --policy.path=${PRETRAINED_MODEL} \
     --policy.device=${DEVICE} \
     --policy.chunk_size=${CHUNK_SIZE} \
     --policy.n_action_steps=${N_ACTION_STEPS} \
-    --policy.dim_model=${DIM_MODEL} \
-    --policy.n_heads=${N_HEADS} \
-    --policy.dim_feedforward=${DIM_FEEDFORWARD} \
-    --policy.n_encoder_layers=${N_ENCODER_LAYERS} \
-    --policy.n_decoder_layers=${N_DECODER_LAYERS} \
-    --policy.latent_dim=${LATENT_DIM} \
-    --policy.dropout=${DROPOUT} \
-    --policy.use_vae=${USE_VAE} \
-    --policy.kl_weight=${KL_WEIGHT} \
-    --policy.vision_backbone=${VISION_BACKBONE} \
-    --policy.pretrained_backbone_weights=${PRETRAINED_BACKBONE} \
+    --policy.num_steps=${NUM_STEPS} \
+    --policy.freeze_vision_encoder=${FREEZE_VISION} \
+    --policy.train_expert_only=${TRAIN_EXPERT_ONLY} \
+    --policy.train_state_proj=${TRAIN_STATE_PROJ} \
     --policy.optimizer_lr=${LEARNING_RATE} \
-    --policy.optimizer_lr_backbone=${LR_BACKBONE} \
     --policy.optimizer_weight_decay=${WEIGHT_DECAY} \
+    --policy.optimizer_grad_clip_norm=${GRAD_CLIP_NORM} \
+    --policy.scheduler_warmup_steps=${WARMUP_STEPS} \
+    --policy.scheduler_decay_steps=${DECAY_STEPS} \
+    --policy.scheduler_decay_lr=${DECAY_LR} \
     --policy.push_to_hub=false \
     --batch_size=${BATCH_SIZE} \
     --steps=${MAX_STEPS} \
@@ -197,9 +200,12 @@ CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::Deprecati
     --num_workers=${NUM_WORKERS} \
     --seed=${SEED} \
     --output_dir=${OUTPUT_DIR} \
-    --job_name=act_pickplace \
+    --job_name=smolvla_pickplace \
     --wandb.enable=false \
     ${RESUME_FLAG}"
+
+# Add rename_map for camera name mapping (no spaces, no extra quotes)
+CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\"}"
 
 # =============================================================================
 # Run Training
