@@ -35,6 +35,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # Add lerobot src to PYTHONPATH
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 
+# Suppress deprecation warnings (pyav triggers torchvision warnings, pynvml triggers FutureWarning)
+export PYTHONWARNINGS="ignore::UserWarning:torchvision,ignore::FutureWarning:torch.cuda"
+
 # Change to project root (required for relative paths)
 cd "${PROJECT_ROOT}"
 
@@ -97,19 +100,6 @@ RESUME_FROM="${RESUME_FROM:-}"
 # Validation and Setup
 # =============================================================================
 
-echo "=============================================="
-echo "ACT Training for Pick and Place"
-echo "=============================================="
-echo ""
-echo "Configuration:"
-echo "  Dataset:        ${DATASET_PATH}"
-echo "  Max Steps:      ${MAX_STEPS}"
-echo "  Batch Size:     ${BATCH_SIZE}"
-echo "  Learning Rate:  ${LEARNING_RATE}"
-echo "  Chunk Size:     ${CHUNK_SIZE}"
-echo "  Output Dir:     ${OUTPUT_DIR}"
-echo ""
-
 # Validate dataset exists
 if [ ! -d "${DATASET_PATH}" ]; then
     echo "ERROR: Dataset directory not found: ${DATASET_PATH}"
@@ -153,9 +143,27 @@ mkdir -p "${LOG_DIR}"
 OUTPUT_NAME=$(basename "${OUTPUT_DIR}")
 LOG_FILE="${LOG_DIR}/train_${OUTPUT_NAME}.log"
 
-echo "Training started at $(date)"
-echo "Log file: ${LOG_FILE}"
-echo ""
+# Function to log to both terminal and file
+log() {
+    echo "$@" | tee -a "${LOG_FILE}"
+}
+
+# Start logging
+log "=============================================="
+log "ACT Training for Pick and Place"
+log "=============================================="
+log ""
+log "Configuration:"
+log "  Dataset:        ${DATASET_PATH}"
+log "  Max Steps:      ${MAX_STEPS}"
+log "  Batch Size:     ${BATCH_SIZE}"
+log "  Learning Rate:  ${LEARNING_RATE}"
+log "  Chunk Size:     ${CHUNK_SIZE}"
+log "  Output Dir:     ${OUTPUT_DIR}"
+log ""
+log "Training started at $(date)"
+log "Log file: ${LOG_FILE}"
+log ""
 
 # Build the training command
 CMD="python -m lerobot.scripts.lerobot_train \
@@ -196,27 +204,27 @@ CMD="python -m lerobot.scripts.lerobot_train \
 # Run Training
 # =============================================================================
 
-echo "Running command:"
-echo "${CMD}"
-echo ""
-echo "=============================================="
+log "Running command:"
+log "${CMD}"
+log ""
+log "=============================================="
 
-# Run training and log output
+# Run training and log output to both terminal and file
 ${CMD} 2>&1 | tee -a "${LOG_FILE}"
 
 # Check exit status
 EXIT_CODE=${PIPESTATUS[0]}
 if [ ${EXIT_CODE} -eq 0 ]; then
-    echo ""
-    echo "=============================================="
-    echo "Training completed successfully!"
-    echo "Checkpoints saved to: ${OUTPUT_DIR}/checkpoints"
-    echo "=============================================="
+    log ""
+    log "=============================================="
+    log "Training completed successfully!"
+    log "Checkpoints saved to: ${OUTPUT_DIR}/checkpoints"
+    log "=============================================="
 else
-    echo ""
-    echo "=============================================="
-    echo "Training failed with exit code: ${EXIT_CODE}"
-    echo "Check log file: ${LOG_FILE}"
-    echo "=============================================="
+    log ""
+    log "=============================================="
+    log "Training failed with exit code: ${EXIT_CODE}"
+    log "Check log file: ${LOG_FILE}"
+    log "=============================================="
     exit ${EXIT_CODE}
 fi
