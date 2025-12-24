@@ -29,8 +29,12 @@
 # Key differences from SmolVLA:
 #   - Larger model (PaliGemma 2B + Gemma 300M vs SmolVLA's smaller backbone)
 #   - Uses quantiles normalization by default
-#   - Requires gradient_checkpointing for 24GB VRAM
+#   - REQUIRES LoRA for 24GB VRAM (full fine-tune needs ~48GB)
 #   - Lower default learning rate (2.5e-5 vs 1e-4)
+#
+# Memory requirements:
+#   - Full fine-tuning: ~48GB VRAM (not possible on 24GB)
+#   - LoRA (default): ~16-20GB VRAM (works on 24GB)
 #
 # =============================================================================
 
@@ -79,8 +83,10 @@ PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/pi05_base}"
 MAX_STEPS="${MAX_STEPS:-3000}"
 
 # Batch size: CRITICAL for 24GB VRAM
-# With gradient_checkpointing + bfloat16, batch_size=8 is safe for 24GB
-# Try batch_size=16 if you have headroom, but monitor VRAM usage
+# With LoRA + gradient_checkpointing + bfloat16:
+#   - batch_size=8: ~18-20GB VRAM (recommended)
+#   - batch_size=4: ~14-16GB VRAM (safer)
+# Without LoRA: OOM on 24GB regardless of batch size
 BATCH_SIZE="${BATCH_SIZE:-8}"
 
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -106,10 +112,19 @@ DECAY_LR="${DECAY_LR:-2.5e-6}"
 # Memory Optimization (CRITICAL for 24GB VRAM)
 # gradient_checkpointing: Reduces VRAM by ~30-50%, slight speed penalty
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
-# compile_model: Uses torch.compile for potential speedup
-COMPILE_MODEL="${COMPILE_MODEL:-true}"
+# compile_model: Uses torch.compile for potential speedup (DISABLE for 24GB VRAM)
+# WARNING: torch.compile causes OOM on 24GB GPUs due to CUDA graph memory overhead
+COMPILE_MODEL="${COMPILE_MODEL:-false}"
 # dtype: bfloat16 for memory efficiency (requires Ampere or newer GPU)
 DTYPE="${DTYPE:-bfloat16}"
+
+# LoRA Configuration (REQUIRED for 24GB VRAM)
+# Full fine-tuning of 4B model requires ~48GB VRAM (model + gradients + Adam states)
+# LoRA reduces trainable params from 4B to ~40M (1%), enabling 24GB training
+USE_LORA="${USE_LORA:-true}"
+LORA_RANK="${LORA_RANK:-16}"        # Rank 16 recommended for 24GB (higher = more params)
+LORA_ALPHA="${LORA_ALPHA:-32}"      # Typically 2x rank
+LORA_DROPOUT="${LORA_DROPOUT:-0.1}" # Regularization
 
 # Normalization (Pi0.5 uses QUANTILES by default)
 # If your dataset doesn't have quantile stats, use MEAN_STD:
@@ -165,7 +180,9 @@ if [ -n "${RESUME_FROM}" ]; then
         exit 1
     fi
 
-    RESUME_FLAG="--resume --config_path=${RESUME_FROM}/train_config.json"
+    # RESUME_FROM points to pretrained_model dir, checkpoint_path needs parent
+    CHECKPOINT_PATH=$(dirname "${RESUME_FROM}")
+    RESUME_FLAG="--resume=true --config_path=${RESUME_FROM}/train_config.json --checkpoint_path=${CHECKPOINT_PATH}"
 
     # Use the checkpoint's output directory
     CHECKPOINT_DIR=$(dirname "$(dirname "${RESUME_FROM}")")
@@ -205,6 +222,8 @@ log "  Warmup Steps:          ${WARMUP_STEPS}"
 log "  Gradient Checkpointing: ${GRADIENT_CHECKPOINTING}"
 log "  Compile Model:         ${COMPILE_MODEL}"
 log "  Dtype:                 ${DTYPE}"
+log "  Use LoRA:              ${USE_LORA}"
+log "  LoRA Rank:             ${LORA_RANK}"
 log "  Normalization:         ${NORMALIZATION_MODE}"
 log "  Output Dir:            ${OUTPUT_DIR}"
 log ""
@@ -233,6 +252,10 @@ CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::Deprecati
     --policy.scheduler_warmup_steps=${WARMUP_STEPS} \
     --policy.scheduler_decay_steps=${DECAY_STEPS} \
     --policy.scheduler_decay_lr=${DECAY_LR} \
+    --policy.use_lora=${USE_LORA} \
+    --policy.lora_rank=${LORA_RANK} \
+    --policy.lora_alpha=${LORA_ALPHA} \
+    --policy.lora_dropout=${LORA_DROPOUT} \
     --policy.push_to_hub=false \
     --batch_size=${BATCH_SIZE} \
     --steps=${MAX_STEPS} \
@@ -250,9 +273,9 @@ if [ "${NORMALIZATION_MODE}" = "MEAN_STD" ]; then
     CMD="${CMD} --policy.normalization_mapping={\"ACTION\":\"MEAN_STD\",\"STATE\":\"MEAN_STD\",\"VISUAL\":\"IDENTITY\"}"
 fi
 
-# Add rename_map for camera name mapping (no spaces, no extra quotes)
-# Map dataset camera names to Pi0.5 expected names
-CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.base_0_rgb\",\"observation.images.left_wrist\":\"observation.images.left_wrist_0_rgb\"}"
+# NOTE: Pi0.5 uses the dataset's original camera names directly
+# No rename_map needed (unlike SmolVLA/xVLA which expect camera1/camera2)
+# The policy auto-detects image features from the dataset
 
 # =============================================================================
 # Run Training

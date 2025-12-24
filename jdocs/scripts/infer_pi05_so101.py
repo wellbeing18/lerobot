@@ -283,10 +283,10 @@ def format_observation(
 ) -> dict:
     """Format observation for Pi0.5 policy input.
 
-    Pi0.5 expects:
+    Pi0.5 was trained WITHOUT rename_map, so it expects:
         observation.state: (B=1, D=6) float32 tensor
-        observation.images.base_0_rgb: (B=1, C=3, H, W) float32 tensor [0, 1]
-        observation.images.left_wrist_0_rgb: (B=1, C=3, H, W) float32 tensor [0, 1]
+        observation.images.head: (B=1, C=3, H, W) float32 tensor [0, 1]
+        observation.images.left_wrist: (B=1, C=3, H, W) float32 tensor [0, 1]
         task: str (language description)
 
     Note: Pi0.5's processor will resize images to 224x224 and normalize to [-1, 1]
@@ -296,21 +296,14 @@ def format_observation(
     # State: convert to tensor with batch dimension
     observation["observation.state"] = torch.from_numpy(state).float().unsqueeze(0).to(device)
 
-    # Images: convert to tensor format (B, C, H, W) normalized to [0, 1]
-    # Map dataset camera names to Pi0.5 expected names (matching training rename_map)
-    key_mapping = {
-        "head": "base_0_rgb",
-        "left_wrist": "left_wrist_0_rgb"
-    }
-
+    # Images: use original camera names (head, left_wrist) as trained
+    # NOTE: Pi0.5 training script does NOT use rename_map, so policy expects
+    # the dataset's original camera names
     for name, frame in images.items():
-        # Map specific camera names to Pi0.5 policy inputs
-        policy_key_name = key_mapping.get(name, name)
-
         # frame is (H, W, C) uint8 RGB, convert to (B=1, C, H, W) float32
         img_tensor = torch.from_numpy(frame).float() / 255.0
         img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)  # (1, C, H, W)
-        observation[f"observation.images.{policy_key_name}"] = img_tensor.to(device)
+        observation[f"observation.images.{name}"] = img_tensor.to(device)
 
     # Task description for Pi0.5 (language conditioning)
     observation["task"] = task

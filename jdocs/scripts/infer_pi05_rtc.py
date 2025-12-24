@@ -334,22 +334,19 @@ def format_observation(
 ) -> dict:
     """Format observation for Pi0.5 policy input.
 
-    Pi0.5 expects camera names like base_0_rgb, left_wrist_0_rgb.
-    This matches the rename_map used in training.
+    Pi0.5 was trained WITHOUT rename_map, so it expects the original dataset
+    camera names: 'head' and 'left_wrist' (not base_0_rgb, left_wrist_0_rgb).
     """
     observation = {}
 
     # State
     observation["observation.state"] = torch.from_numpy(state).float().unsqueeze(0).to(device)
 
-    # Images with camera name mapping (head->base_0_rgb, left_wrist->left_wrist_0_rgb)
-    key_mapping = {"head": "base_0_rgb", "left_wrist": "left_wrist_0_rgb"}
-
+    # Images - use original camera names (head, left_wrist) as trained
     for name, frame in images.items():
-        policy_key = key_mapping.get(name, name)
         img_tensor = torch.from_numpy(frame).float() / 255.0
         img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
-        observation[f"observation.images.{policy_key}"] = img_tensor.to(device)
+        observation[f"observation.images.{name}"] = img_tensor.to(device)
 
     observation["task"] = [task]  # Must be a list for Pi0.5
 
