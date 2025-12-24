@@ -64,3 +64,11 @@ The scripts are in good shape and follow LeRobot's patterns for ACT. The trainin
 
 
 
+
+
+
+
+
+
+
+

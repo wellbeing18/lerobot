@@ -394,12 +394,15 @@ def get_actions_thread(
                 obs = preprocessor(obs)
 
                 # Generate actions with RTC
-                with torch.inference_mode():
-                    actions = policy.predict_action_chunk(
-                        obs,
-                        inference_delay=inference_delay,
-                        prev_chunk_left_over=prev_actions,
-                    )
+                # NOTE: Do NOT use torch.inference_mode() here!
+                # - predict_action_chunk already has @torch.no_grad() decorator
+                # - RTC internally uses torch.enable_grad() for autograd.grad()
+                # - inference_mode() is stricter and CANNOT be overridden by enable_grad()
+                actions = policy.predict_action_chunk(
+                    obs,
+                    inference_delay=inference_delay,
+                    prev_chunk_left_over=prev_actions,
+                )
 
                 # Store original for RTC
                 original_actions = actions.squeeze(0).clone()

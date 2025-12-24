@@ -306,7 +306,9 @@ def format_observation(
         observation[f"observation.images.{name}"] = img_tensor.to(device)
 
     # Task description for Pi0.5 (language conditioning)
-    observation["task"] = task
+    # CRITICAL: Task MUST be a list, not a string!
+    # The preprocessor's TokenizerProcessorStep expects a list for batch processing
+    observation["task"] = [task]
 
     return observation
 
