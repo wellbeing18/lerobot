@@ -123,7 +123,9 @@ if [ -n "${RESUME_FROM}" ]; then
     fi
 
     echo "Resuming from: ${RESUME_FROM}"
-    RESUME_FLAG="--resume --config_path=${RESUME_FROM}/train_config.json"
+    # RESUME_FROM points to pretrained_model dir, checkpoint_path needs parent
+    CHECKPOINT_PATH=$(dirname "${RESUME_FROM}")
+    RESUME_FLAG="--resume=true --config_path=${RESUME_FROM}/train_config.json --checkpoint_path=${CHECKPOINT_PATH}"
 
     # Use the checkpoint's output directory
     CHECKPOINT_DIR=$(dirname "$(dirname "${RESUME_FROM}")")
