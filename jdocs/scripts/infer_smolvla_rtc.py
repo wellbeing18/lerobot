@@ -60,6 +60,12 @@ import torch
 import yaml
 from torch import Tensor
 
+# Import LeRobot's built-in RTC classes
+from lerobot.policies.rtc.action_queue import ActionQueue
+from lerobot.policies.rtc.latency_tracker import LatencyTracker
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
+from lerobot.configs.types import RTCAttentionSchedule
+
 # ============================================================================
 # KEY CONFIGURATION
 # ============================================================================
@@ -249,83 +255,6 @@ class ThreadSafeCameras:
                 cap.release()
 
 
-class LatencyTracker:
-    """Track inference latency for adaptive delay calculation."""
-
-    def __init__(self, window_size: int = 10):
-        self.latencies = []
-        self.window_size = window_size
-
-    def add(self, latency: float):
-        """Add a latency measurement."""
-        self.latencies.append(latency)
-        if len(self.latencies) > self.window_size:
-            self.latencies.pop(0)
-
-    def max(self) -> float:
-        """Get maximum latency in window."""
-        return max(self.latencies) if self.latencies else 0.5
-
-    def avg(self) -> float:
-        """Get average latency in window."""
-        return sum(self.latencies) / len(self.latencies) if self.latencies else 0.5
-
-
-class ActionQueue:
-    """Thread-safe action queue with RTC support."""
-
-    def __init__(self, execution_horizon: int = 10):
-        self.lock = Lock()
-        self.queue = []  # List of (original_action, postprocessed_action) tuples
-        self.action_index = 0
-        self.execution_horizon = execution_horizon
-        self.prev_chunk_original = None  # For RTC blending
-
-    def qsize(self) -> int:
-        """Get current queue size."""
-        with self.lock:
-            return len(self.queue)
-
-    def get(self) -> Tensor | None:
-        """Get next action from queue."""
-        with self.lock:
-            if not self.queue:
-                return None
-            action = self.queue.pop(0)
-            self.action_index += 1
-            return action
-
-    def get_action_index(self) -> int:
-        """Get current action index."""
-        with self.lock:
-            return self.action_index
-
-    def get_left_over(self) -> Tensor | None:
-        """Get remaining actions for RTC blending."""
-        with self.lock:
-            if self.prev_chunk_original is None:
-                return None
-            # Return the portion that was already executed
-            return self.prev_chunk_original
-
-    def merge(self, original_actions: Tensor, postprocessed_actions: Tensor,
-              inference_delay: int, action_index_before: int):
-        """Merge new action chunk with queue."""
-        with self.lock:
-            # Calculate how many actions were consumed during inference
-            consumed = self.action_index - action_index_before
-
-            # Skip first 'consumed + inference_delay' actions (already outdated)
-            skip = max(0, consumed + inference_delay)
-
-            if skip < len(postprocessed_actions):
-                new_actions = postprocessed_actions[skip:]
-                self.queue.extend(new_actions.unbind(0))
-
-            # Store original actions for next RTC iteration
-            self.prev_chunk_original = original_actions
-
-
 def format_observation(
     images: dict,
     state: np.ndarray,
@@ -364,6 +293,7 @@ def get_actions_thread(
     fps: float,
     action_queue_threshold: int,
     device: str,
+    rtc_enabled: bool = True,
 ):
     """Background thread for action prediction with RTC."""
     try:
@@ -379,7 +309,7 @@ def get_actions_thread(
                 prev_actions = action_queue.get_left_over()
 
                 # Calculate inference delay from latency
-                inference_latency = latency_tracker.max()
+                inference_latency = latency_tracker.max() or 0.5  # Default 0.5s if no data
                 inference_delay = math.ceil(inference_latency / time_per_step)
 
                 # Capture observation
@@ -392,13 +322,24 @@ def get_actions_thread(
                 # Preprocess
                 obs = preprocessor(obs)
 
-                # Generate actions with RTC
-                with torch.inference_mode():
+                # Generate actions
+                # NOTE: RTC requires gradients for guided denoising correction
+                # When RTC is disabled, we can use inference_mode for efficiency
+                if rtc_enabled:
+                    # RTC mode: needs gradients for torch.autograd.grad()
                     actions = policy.predict_action_chunk(
                         obs,
                         inference_delay=inference_delay,
                         prev_chunk_left_over=prev_actions,
                     )
+                else:
+                    # Non-RTC mode: use inference_mode for efficiency
+                    with torch.inference_mode():
+                        actions = policy.predict_action_chunk(
+                            obs,
+                            inference_delay=0,  # No delay tracking without RTC
+                            prev_chunk_left_over=None,  # No blending without RTC
+                        )
 
                 # Store original for RTC
                 original_actions = actions.squeeze(0).clone()
@@ -565,8 +506,6 @@ def main():
         logger.info("\nLoading SmolVLA policy with RTC...")
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
         from lerobot.policies.factory import make_pre_post_processors
-        from lerobot.policies.rtc.configuration_rtc import RTCConfig
-        from lerobot.configs.types import RTCAttentionSchedule
         from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
         # Load policy
@@ -584,6 +523,8 @@ def main():
             policy.init_rtc_processor()
             logger.info(f"  RTC enabled: horizon={args.execution_horizon}, weight={args.max_guidance_weight}")
         else:
+            # Create disabled RTC config for ActionQueue
+            rtc_config = RTCConfig(enabled=False)
             logger.info("  RTC disabled (standard chunking)")
 
         policy.eval()
@@ -613,8 +554,8 @@ def main():
         if args.dry_run:
             logger.info("  DRY RUN mode - no robot commands")
 
-        # Create action queue
-        action_queue = ActionQueue(execution_horizon=args.execution_horizon)
+        # Create action queue (uses LeRobot's built-in RTC ActionQueue)
+        action_queue = ActionQueue(rtc_config)
 
         # Start threads
         logger.info("\nStarting RTC inference threads...")
@@ -623,7 +564,7 @@ def main():
             target=get_actions_thread,
             args=(policy, preprocessor, postprocessor, cameras, robot,
                   action_queue, shutdown_event, args.task, args.fps,
-                  args.action_queue_threshold, args.device),
+                  args.action_queue_threshold, args.device, not args.no_rtc),
             daemon=True,
             name="GetActions"
         )

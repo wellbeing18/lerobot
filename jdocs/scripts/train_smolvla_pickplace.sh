@@ -132,7 +132,9 @@ if [ -n "${RESUME_FROM}" ]; then
         exit 1
     fi
 
-    RESUME_FLAG="--resume --config_path=${RESUME_FROM}/train_config.json"
+    # RESUME_FROM points to pretrained_model dir
+    # checkpoint_path is auto-derived from config_path in LeRobot
+    RESUME_FLAG="--resume=true --config_path=${RESUME_FROM}/train_config.json"
 
     # Use the checkpoint's output directory
     CHECKPOINT_DIR=$(dirname "$(dirname "${RESUME_FROM}")")
@@ -178,35 +180,54 @@ log ""
 # Build the training command
 # Note: SmolVLA uses --policy.path for pretrained model instead of --policy.type
 # Use -W flags to suppress all UserWarnings and FutureWarnings
-CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning -m lerobot.scripts.lerobot_train \
-    --dataset.repo_id=${DATASET_NAME} \
-    --dataset.root=${DATASET_PATH} \
-    --dataset.video_backend=pyav \
-    --policy.path=${PRETRAINED_MODEL} \
-    --policy.device=${DEVICE} \
-    --policy.chunk_size=${CHUNK_SIZE} \
-    --policy.n_action_steps=${N_ACTION_STEPS} \
-    --policy.num_steps=${NUM_STEPS} \
-    --policy.freeze_vision_encoder=${FREEZE_VISION} \
-    --policy.train_expert_only=${TRAIN_EXPERT_ONLY} \
-    --policy.train_state_proj=${TRAIN_STATE_PROJ} \
-    --policy.optimizer_lr=${LEARNING_RATE} \
-    --policy.optimizer_weight_decay=${WEIGHT_DECAY} \
-    --policy.optimizer_grad_clip_norm=${GRAD_CLIP_NORM} \
-    --policy.scheduler_warmup_steps=${WARMUP_STEPS} \
-    --policy.scheduler_decay_steps=${DECAY_STEPS} \
-    --policy.scheduler_decay_lr=${DECAY_LR} \
-    --policy.push_to_hub=false \
-    --batch_size=${BATCH_SIZE} \
-    --steps=${MAX_STEPS} \
-    --save_freq=${SAVE_STEPS} \
-    --log_freq=${LOG_FREQ} \
-    --num_workers=${NUM_WORKERS} \
-    --seed=${SEED} \
-    --output_dir=${OUTPUT_DIR} \
-    --job_name=smolvla_pickplace \
-    --wandb.enable=false \
-    ${RESUME_FLAG}"
+# IMPORTANT: When resuming, we use config_path (not policy.path) to load everything
+if [ -n "${RESUME_FROM}" ]; then
+    # Resume mode: use config_path, don't specify policy.path
+    CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning -m lerobot.scripts.lerobot_train \
+        --dataset.repo_id=${DATASET_NAME} \
+        --dataset.root=${DATASET_PATH} \
+        --dataset.video_backend=pyav \
+        --batch_size=${BATCH_SIZE} \
+        --steps=${MAX_STEPS} \
+        --save_freq=${SAVE_STEPS} \
+        --log_freq=${LOG_FREQ} \
+        --num_workers=${NUM_WORKERS} \
+        --seed=${SEED} \
+        --output_dir=${OUTPUT_DIR} \
+        --job_name=smolvla_pickplace \
+        --wandb.enable=false \
+        ${RESUME_FLAG}"
+else
+    # Fresh training: specify policy.path and all policy settings
+    CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning -m lerobot.scripts.lerobot_train \
+        --dataset.repo_id=${DATASET_NAME} \
+        --dataset.root=${DATASET_PATH} \
+        --dataset.video_backend=pyav \
+        --policy.path=${PRETRAINED_MODEL} \
+        --policy.device=${DEVICE} \
+        --policy.chunk_size=${CHUNK_SIZE} \
+        --policy.n_action_steps=${N_ACTION_STEPS} \
+        --policy.num_steps=${NUM_STEPS} \
+        --policy.freeze_vision_encoder=${FREEZE_VISION} \
+        --policy.train_expert_only=${TRAIN_EXPERT_ONLY} \
+        --policy.train_state_proj=${TRAIN_STATE_PROJ} \
+        --policy.optimizer_lr=${LEARNING_RATE} \
+        --policy.optimizer_weight_decay=${WEIGHT_DECAY} \
+        --policy.optimizer_grad_clip_norm=${GRAD_CLIP_NORM} \
+        --policy.scheduler_warmup_steps=${WARMUP_STEPS} \
+        --policy.scheduler_decay_steps=${DECAY_STEPS} \
+        --policy.scheduler_decay_lr=${DECAY_LR} \
+        --policy.push_to_hub=false \
+        --batch_size=${BATCH_SIZE} \
+        --steps=${MAX_STEPS} \
+        --save_freq=${SAVE_STEPS} \
+        --log_freq=${LOG_FREQ} \
+        --num_workers=${NUM_WORKERS} \
+        --seed=${SEED} \
+        --output_dir=${OUTPUT_DIR} \
+        --job_name=smolvla_pickplace \
+        --wandb.enable=false"
+fi
 
 # Add rename_map for camera name mapping (no spaces, no extra quotes)
 CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\"}"
