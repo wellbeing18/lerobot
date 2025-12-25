@@ -70,8 +70,8 @@ DEFAULT_EXECUTION_HORIZON = 10  # Steps to blend with previous chunk
 DEFAULT_MAX_GUIDANCE_WEIGHT = 10.0  # How strongly to enforce consistency
 DEFAULT_ACTION_QUEUE_THRESHOLD = 30  # Request new chunk when queue <= this
 
-# Hardware Config
-HARDWARE_CONFIG = "jdocs/scripts/so101_hardware.yaml"
+# Hardware Config - Use Pi0.5-specific config with safety clamping and warmup
+HARDWARE_CONFIG = "jdocs/scripts/so101_pi05_hardware.yaml"
 
 # Timing
 MAX_DURATION = 60.0  # Maximum run duration in seconds
@@ -258,14 +258,23 @@ class ThreadSafeRobot:
             from lerobot.robots.so101_follower.so101_follower import SO101Follower
 
             robot_config = self.hw_config.get("robot", {})
+
+            # FIX: Add max_relative_target for safety clamping (GPT recommendation)
+            # This limits how far the goal can be from current position per step
+            max_relative_target = robot_config.get("max_relative_target", None)
+
             config = SO101FollowerConfig(
                 port=robot_config.get("port", "/dev/ttyACM1"),
                 id=robot_config.get("id", "xlerobot_left_arm"),
+                max_relative_target=max_relative_target,
+                use_degrees=robot_config.get("use_degrees", True),
             )
 
             self.robot = SO101Follower(config)
             self.robot.connect()
             logger.info(f"Robot connected on {config.port}")
+            if max_relative_target is not None:
+                logger.info(f"  Safety clamping enabled: max_relative_target={max_relative_target}")
 
         except Exception as e:
             logger.error(f"Failed to connect to robot: {e}")
@@ -378,16 +387,23 @@ class LatencyTracker:
 
 
 class ActionQueue:
-    """Thread-safe action queue with RTC support and trace tracking."""
+    """Thread-safe action queue with RTC support and trace tracking.
+
+    FIXED BUGS (from Gemini analysis):
+    1. Step counter now tracks time/loops, not just successful action retrievals
+    2. New chunks REPLACE outdated future actions instead of appending
+    """
 
     def __init__(self, execution_horizon: int = 10):
         self.lock = Lock()
         self.queue = []  # List of postprocessed actions
-        self.action_index = 0  # Global action counter
+        self.action_index = 0  # Actions successfully retrieved
+        self.step_counter = 0  # Global step counter (increments every loop)
         self.chunk_action_index = 0  # Index within current chunk
         self.execution_horizon = execution_horizon
         self.prev_chunk_original = None  # For RTC blending
-        self.current_chunk_start = 0  # Action index when current chunk started
+        self.current_chunk_start = 0  # Step when current chunk started
+        self.inference_in_flight_step = -1  # Step when inference started
 
     def qsize(self) -> int:
         """Get current queue size."""
@@ -405,10 +421,25 @@ class ActionQueue:
             self.chunk_action_index += 1
             return action, chunk_idx
 
+    def increment_step(self):
+        """Increment step counter. Called every loop iteration."""
+        with self.lock:
+            self.step_counter += 1
+
+    def get_step_counter(self) -> int:
+        """Get current step counter."""
+        with self.lock:
+            return self.step_counter
+
     def get_action_index(self) -> int:
         """Get current action index."""
         with self.lock:
             return self.action_index
+
+    def mark_inference_start(self):
+        """Mark the step when inference started."""
+        with self.lock:
+            self.inference_in_flight_step = self.step_counter
 
     def get_left_over(self) -> Tensor | None:
         """Get remaining actions for RTC blending."""
@@ -418,25 +449,42 @@ class ActionQueue:
             return self.prev_chunk_original
 
     def merge(self, original_actions: Tensor, postprocessed_actions: Tensor,
-              inference_delay: int, action_index_before: int) -> int:
-        """Merge new action chunk with queue. Returns chunk start index."""
-        with self.lock:
-            # Calculate how many actions were consumed during inference
-            consumed = self.action_index - action_index_before
+              inference_delay: int, step_when_started: int) -> int:
+        """Merge new action chunk with queue. Returns chunk start index.
 
-            # Skip first 'consumed + inference_delay' actions (already outdated)
-            skip = max(0, consumed + inference_delay)
+        FIXED: Now uses step_counter to calculate how many steps passed during
+        inference, instead of action_index which only counts successful retrievals.
+        This prevents the "jump bug" where early empty queue steps aren't counted.
+
+        FIXED: Now REPLACES queue instead of appending, so the robot always
+        executes the most recent prediction, not stale actions.
+        """
+        with self.lock:
+            # FIX: Calculate elapsed steps based on step_counter, not action_index
+            # This correctly counts steps even when queue was empty
+            steps_elapsed = self.step_counter - step_when_started
+
+            # Skip actions that are already in the past
+            # inference_delay accounts for model latency
+            skip = max(0, steps_elapsed)
 
             if skip < len(postprocessed_actions):
                 new_actions = postprocessed_actions[skip:]
-                self.queue.extend(new_actions.unbind(0))
+
+                # FIX: REPLACE queue instead of extending
+                # This ensures we always use the freshest prediction
+                self.queue = list(new_actions.unbind(0))
+            else:
+                # All actions in this chunk are already stale
+                # This shouldn't happen in normal operation
+                self.queue = []
 
             # Store original actions for next RTC iteration
             self.prev_chunk_original = original_actions
 
             # Reset chunk index and record start
             self.chunk_action_index = 0
-            chunk_start = self.action_index
+            chunk_start = self.step_counter
             self.current_chunk_start = chunk_start
 
             return chunk_start
@@ -501,7 +549,9 @@ def get_actions_thread(
         while not shutdown_event.is_set():
             if action_queue.qsize() <= action_queue_threshold:
                 start_time = time.perf_counter()
-                action_index_before = action_queue.get_action_index()
+                # FIX: Use step_counter instead of action_index for timing
+                step_when_started = action_queue.get_step_counter()
+                action_queue.mark_inference_start()
                 prev_actions = action_queue.get_left_over()
 
                 # Calculate inference delay from latency
@@ -547,15 +597,16 @@ def get_actions_thread(
                 new_delay = math.ceil(new_latency / time_per_step)
 
                 # Merge into queue and get chunk start index
+                # FIX: Pass step_when_started instead of action_index_before
                 chunk_start_idx = action_queue.merge(
                     original_actions, postprocessed,
-                    new_delay, action_index_before
+                    new_delay, step_when_started
                 )
 
                 # Save images on inference steps
                 if save_images:
                     for name, frame in images.items():
-                        img_path = images_dir / f"step_{action_index_before:04d}_{name}.jpg"
+                        img_path = images_dir / f"step_{step_when_started:04d}_{name}.jpg"
                         cv2.imwrite(str(img_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
                 # Create inference data for execute thread
@@ -631,6 +682,10 @@ def execute_actions_thread(
 
         while not shutdown_event.is_set():
             t_loop_start = time.perf_counter() - trace_start
+
+            # FIX: Increment step counter EVERY loop iteration
+            # This ensures accurate timing even when queue is empty
+            action_queue.increment_step()
 
             # Get queue size before action
             queue_size_before = action_queue.qsize()
@@ -934,6 +989,23 @@ def main():
         # Load hardware config
         hw_config = load_hardware_config(args.hw_config)
 
+        # Override defaults from config file if not specified on command line
+        inference_config = hw_config.get("inference", {})
+        rtc_config_yaml = hw_config.get("rtc", {})
+
+        # Use FPS from config if available (ensures match with training data)
+        if args.fps == DEFAULT_FPS and "fps" in inference_config:
+            args.fps = inference_config["fps"]
+            logger.info(f"Using FPS from config: {args.fps}")
+
+        # Use RTC parameters from config if available
+        if args.execution_horizon == DEFAULT_EXECUTION_HORIZON and "execution_horizon" in rtc_config_yaml:
+            args.execution_horizon = rtc_config_yaml["execution_horizon"]
+        if args.max_guidance_weight == DEFAULT_MAX_GUIDANCE_WEIGHT and "max_guidance_weight" in rtc_config_yaml:
+            args.max_guidance_weight = rtc_config_yaml["max_guidance_weight"]
+        if args.action_queue_threshold == DEFAULT_ACTION_QUEUE_THRESHOLD and "action_queue_threshold" in rtc_config_yaml:
+            args.action_queue_threshold = rtc_config_yaml["action_queue_threshold"]
+
         # Load policy with RTC
         logger.info("\nLoading Pi0.5 policy with RTC...")
         from lerobot.policies.pi05.modeling_pi05 import PI05Policy
@@ -982,6 +1054,36 @@ def main():
         logger.info("\nInitializing hardware...")
         cameras = ThreadSafeCameras(hw_config)
         robot = ThreadSafeRobot(hw_config, dry_run=args.dry_run)
+
+        # FIX: Hardware pre-warming (Gemini recommendation)
+        # Run dummy cycles to prime camera buffers and GPU caches
+        warmup_config = hw_config.get("warmup", {})
+        warmup_enabled = warmup_config.get("enabled", True)
+        warmup_cycles = warmup_config.get("cycles", 2)
+
+        if warmup_enabled and warmup_cycles > 0:
+            logger.info(f"\nPre-warming hardware ({warmup_cycles} cycles)...")
+            for i in range(warmup_cycles):
+                warmup_start = time.perf_counter()
+
+                # Capture images (primes camera buffers)
+                images = cameras.capture()
+
+                # Get robot state
+                state = robot.get_state()
+
+                # Format observation
+                obs = format_observation(images, state, args.task, args.device)
+                obs = preprocessor(obs)
+
+                # Run inference (primes GPU caches)
+                with torch.no_grad():
+                    _ = policy.predict_action_chunk(obs, inference_delay=0)
+
+                warmup_time = (time.perf_counter() - warmup_start) * 1000
+                logger.info(f"  Warmup cycle {i+1}/{warmup_cycles}: {warmup_time:.1f}ms")
+
+            logger.info("  Hardware pre-warming complete")
 
         if args.dry_run:
             logger.info("  DRY RUN mode - no robot commands")

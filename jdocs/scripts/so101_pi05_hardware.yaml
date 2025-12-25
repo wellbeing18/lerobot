@@ -1,0 +1,69 @@
+# Hardware configuration for SO101 Pi0.5 inference
+# Based on: jdocs/scripts/so101_hardware.yaml
+# Changes from base config:
+#   - Added max_relative_target for safety clamping (prevents violent swings)
+#   - Added Pi0.5-specific RTC parameters
+#   - FPS set to 30 to match training data
+
+robot:
+  type: so101_follower
+  port: /dev/ttyACM1
+  id: xlerobot_left_arm
+  use_degrees: true
+  # Safety clamping: limit max delta per step to prevent violent motion
+  # Value in degrees - caps how far the goal can be from current position per step
+  # At 30 FPS, this allows ~10 degrees/step = ~300 deg/sec max velocity
+  max_relative_target: 10.0
+
+cameras:
+  head:
+    type: opencv
+    index_or_path: 4
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
+  left_wrist:
+    type: opencv
+    index_or_path: 6
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
+
+inference:
+  # Pi0.5 chunk_size is 50 (from model config)
+  action_horizon: 50
+  # Control frequency - MUST match training data (30 Hz)
+  fps: 30
+  action_interval: 0.033  # 1/30 = 0.033s
+  # Maximum episode duration in seconds
+  default_duration: 60
+  # Device for inference
+  device: cuda
+
+# RTC (Real-Time Chunking) parameters for Pi0.5
+rtc:
+  enabled: true
+  # Execution horizon: steps to blend with previous chunk
+  execution_horizon: 10
+  # Guidance weight: how strongly to enforce consistency
+  max_guidance_weight: 10.0
+  # Request new chunk when queue size <= this threshold
+  action_queue_threshold: 30
+
+# Hardware pre-warming settings
+warmup:
+  # Run dummy inference cycles before main loop to prime GPU and camera buffers
+  enabled: true
+  # Number of warmup cycles
+  cycles: 2
+
+# Joint names for reference (order matters for action vector)
+joints:
+  - shoulder_pan.pos
+  - shoulder_lift.pos
+  - elbow_flex.pos
+  - wrist_flex.pos
+  - wrist_roll.pos
+  - gripper.pos
