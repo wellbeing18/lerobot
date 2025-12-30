@@ -179,5 +179,6 @@ outputs/
 *.part
 
 datasets/
+datasets_bimanuel/
 outputs/
 jdocs/logs/

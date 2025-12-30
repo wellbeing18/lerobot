@@ -1,0 +1,149 @@
+# Bimanual Configuration
+# ======================
+# Configuration for dual-arm bimanual tasks.
+#
+# Prerequisites:
+#   1. Both arms calibrated and tested
+#   2. Bimanual teleoperation verified
+#
+# Usage:
+#   python scripts/collect_bimanuel_xlerobot_data.py --config configs/bimanual.yaml
+#   python scripts/collect_bimanuel_xlerobot_data.py --config configs/bimanual.yaml --task handover
+
+experiment:
+  name: "bimanual"
+  description: "Dual-arm bimanual tasks"
+  version: "1.0.0"
+
+# ==============================================================================
+# HARDWARE CONFIGURATION
+# ==============================================================================
+hardware:
+  arm: "bimanual"
+
+  # Bimanual uses both arms
+  bimanual_config:
+    robots:
+      left:
+        type: "so101_follower"
+        port: "/dev/ttyACM2"
+        id: "xlerobot_left_arm"
+      right:
+        type: "so101_follower"
+        port: "/dev/ttyACM1"
+        id: "xlerobot_right_arm"
+
+    teleops:
+      left:
+        type: "so101_leader"
+        port: "/dev/ttyACM0"
+        id: "xlerobot_left_leader"
+      right:
+        type: "so101_leader"
+        port: "/dev/ttyACM3"
+        id: "xlerobot_right_leader"
+
+    cameras:
+      head:
+        type: "opencv"
+        index: 4
+        width: 640
+        height: 480
+        fps: 30
+      left_wrist:
+        type: "opencv"
+        index: 8
+        width: 640
+        height: 480
+        fps: 30
+      right_wrist:
+        type: "opencv"
+        index: 6
+        width: 640
+        height: 480
+        fps: 30
+
+# ==============================================================================
+# DATA COLLECTION
+# ==============================================================================
+data_collection:
+  datasets_base: "/home/jrobot/project/lerobot/jdocs/bimanual/jassy/datasets_bimanuel"
+  action_fps: 30
+
+  task:
+    # Override with --task flag or set here
+    type: "handover"
+    template: "hand the {object} from left to right"
+    episode_time_s: 45
+    reset_time_s: 25
+    num_episodes: 50
+
+    phases:
+      - "Left arm picks object (0-15s)"
+      - "Position for handover (15-25s)"
+      - "Right arm receives (25-35s)"
+      - "Complete transfer (35-45s)"
+
+    objects:
+      - "cube"
+      - "block"
+      - "small object"
+
+# ==============================================================================
+# TRAINING
+# ==============================================================================
+training:
+  model:
+    type: "pi05"
+    pretrained: null  # Set to checkpoint path for transfer learning
+    use_lora: true
+
+  lora:
+    rank: 32
+    alpha: 32
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+    dropout: 0.0
+
+  hyperparameters:
+    training_steps: 3000
+    batch_size: 4  # Smaller batch for 12-dim actions
+    learning_rate: 5.0e-5
+    warmup_steps: 300
+
+    eval_freq: 300
+    save_freq: 500
+
+    # Action space configuration
+    action_dim: 12  # 6 left + 6 right
+
+    num_workers: 4
+    device: "cuda"
+    use_amp: true
+    seed: 42
+
+  output:
+    base_dir: "/home/jrobot/project/lerobot/jdocs/bimanual/jassy/outputs"
+    save_checkpoints: true
+    save_config: true
+
+# ==============================================================================
+# INFERENCE
+# ==============================================================================
+inference:
+  checkpoint_path: null  # Set to trained checkpoint path
+  max_duration_s: 45
+  control_frequency: 30
+  display_cameras: true
+  record_video: true
+  video_output_dir: "/home/jrobot/project/lerobot/jdocs/bimanual/jassy/outputs/inference_videos"
+
+  # Bimanual-specific inference settings
+  bimanual:
+    enabled: true
+    # Split action vector
+    left_action_indices: [0, 1, 2, 3, 4, 5]
+    right_action_indices: [6, 7, 8, 9, 10, 11]
