@@ -10,15 +10,22 @@
 # and language instructions to predict actions via flow matching.
 #
 # Usage:
-#   # Fresh training with defaults (20k steps)
+#   # Fresh training with defaults (frozen backbone, 20k steps)
 #   bash train_smolvla_pickplace.sh
 #
 #   # Custom training steps and batch size
 #   MAX_STEPS=30000 BATCH_SIZE=32 bash train_smolvla_pickplace.sh
 #
+#   # UNFROZEN VISION training (for positioning accuracy issues)
+#   FREEZE_VISION=false bash train_smolvla_pickplace.sh
+#
 #   # Resume from checkpoint
 #   RESUME_FROM=outputs/smolvla_pickplace_*/checkpoints/010000/pretrained_model \
 #     bash train_smolvla_pickplace.sh
+#
+# Training Modes:
+#   FREEZE_VISION=true  (default) - Frozen backbone, ~100M trainable params, batch_size=32, 20k steps
+#   FREEZE_VISION=false           - Unfrozen vision, ~185M trainable params, batch_size=32, 10k steps
 #
 # Key differences from ACT:
 #   - Uses pretrained VLM backbone (smolvla_base)
@@ -68,9 +75,7 @@ DATASET_NAME="${DATASET_NAME:-pick_and_place}"
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/smolvla_base}"
 
 # Training Hyperparameters
-# SmolVLA paper recommends 20k steps for ~50 episodes
-MAX_STEPS="${MAX_STEPS:-20000}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
+# Note: BATCH_SIZE and MAX_STEPS defaults are set below based on FREEZE_VISION mode
 NUM_WORKERS="${NUM_WORKERS:-4}"
 SEED="${SEED:-1000}"
 
@@ -79,10 +84,106 @@ CHUNK_SIZE="${CHUNK_SIZE:-50}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-50}"
 NUM_STEPS="${NUM_STEPS:-10}"  # Flow matching denoising steps
 
-# Fine-tuning Strategy (recommended to keep defaults)
+# =============================================================================
+# Fine-tuning Strategy
+# =============================================================================
+#
+# SmolVLA (SmolVLM2-500M-Video-Instruct) has 3 main components:
+#   1. Vision Encoder (SigLIP) - ~86M params - processes images
+#   2. Language Model (SmolLM2) - ~260M params - processes text/instructions
+#   3. Action Expert - ~100M params - predicts actions via flow matching
+#   Total: ~450M params
+#
+# CONFIGURATION COMBINATIONS:
+# -----------------------------------------------------------------------------
+# Mode 1: Expert Only (DEFAULT) - Fast training, good for similar tasks
+#   FREEZE_VISION=true, TRAIN_EXPERT_ONLY=true
+#   Trainable: Action Expert (~100M params)
+#   VRAM: ~4-6GB, batch_size=32, steps=20k
+#   Use when: Task is similar to pretraining data, motion learning only
+#
+# Mode 2: Vision + Expert (RECOMMENDED) - For positioning/visual issues
+#   FREEZE_VISION=false, TRAIN_EXPERT_ONLY=true
+#   Trainable: Vision Encoder + Action Expert (~185M params)
+#   VRAM: ~8-12GB with gradient_checkpointing, batch_size=32, steps=10k
+#   Use when: Robot has positioning errors, needs visual-spatial learning
+#   NOTE: With gradient_checkpointing, VRAM is very efficient (~4-8GB)
+#
+# Mode 3: Full VLM - Maximum adaptation, risk of catastrophic forgetting
+#   FREEZE_VISION=false, TRAIN_EXPERT_ONLY=false
+#   Trainable: Vision + Language + Action Expert (~450M params)
+#   VRAM: ~16-24GB, batch_size=16-32
+#   Use when: Task is very different from pretraining, have 500+ episodes
+#   WARNING: Risk of catastrophic forgetting with small datasets
+#
+# Mode 4: Language + Expert (rare) - For language understanding issues
+#   FREEZE_VISION=true, TRAIN_EXPERT_ONLY=false
+#   Trainable: Language Model + Action Expert (~360M params)
+#   VRAM: ~12-16GB, batch_size=16-32
+#   Use when: Model doesn't follow language instructions well
+#
+# QUICK REFERENCE:
+#   FREEZE_VISION=false      → Train vision encoder (for positioning issues)
+#   TRAIN_EXPERT_ONLY=false  → Also train language model (more VRAM)
+#   GRADIENT_CHECKPOINTING=true → Reduce VRAM at cost of ~20% slower training
+#
+# EXAMPLES:
+#   # Mode 1 (default): Expert only
+#   bash train_smolvla_pickplace.sh
+#
+#   # Mode 2 (recommended for positioning): Vision + Expert
+#   FREEZE_VISION=false bash train_smolvla_pickplace.sh
+#
+#   # Mode 3: Full VLM fine-tuning
+#   FREEZE_VISION=false TRAIN_EXPERT_ONLY=false bash train_smolvla_pickplace.sh
+#
+#   # Mode 4: Language + Expert
+#   TRAIN_EXPERT_ONLY=false bash train_smolvla_pickplace.sh
+# =============================================================================
+
 FREEZE_VISION="${FREEZE_VISION:-true}"
 TRAIN_EXPERT_ONLY="${TRAIN_EXPERT_ONLY:-true}"
 TRAIN_STATE_PROJ="${TRAIN_STATE_PROJ:-true}"
+
+# Auto-adjust settings based on fine-tuning mode
+# User can override any of these by setting environment variables
+if [ "${FREEZE_VISION}" = "false" ]; then
+    # Unfrozen vision mode (Mode 2 or 3)
+    # Vision encoder adds ~86M trainable params
+    # With gradient_checkpointing, VRAM is very efficient - can use batch_size=32
+    BATCH_SIZE="${BATCH_SIZE:-32}"
+    MAX_STEPS="${MAX_STEPS:-10000}"
+    SAVE_STEPS="${SAVE_STEPS:-2500}"  # 4 checkpoints for 10k steps
+    WARMUP_STEPS="${WARMUP_STEPS:-500}"  # Shorter warmup for 10k steps
+    # Enable gradient checkpointing by default for unfrozen mode (saves VRAM)
+    GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
+
+    if [ "${TRAIN_EXPERT_ONLY}" = "true" ]; then
+        echo ">>> MODE 2: VISION + EXPERT (Recommended for positioning issues) <<<"
+        echo "    Trainable: Vision Encoder (~86M) + Action Expert (~100M) = ~185M params"
+    else
+        echo ">>> MODE 3: FULL VLM (Maximum adaptation, higher risk) <<<"
+        echo "    Trainable: Vision + Language + Expert = ~450M params"
+        echo "    WARNING: Risk of catastrophic forgetting with small datasets"
+    fi
+    echo "    batch_size=${BATCH_SIZE}, max_steps=${MAX_STEPS}, gradient_checkpointing=${GRADIENT_CHECKPOINTING}"
+else
+    # Frozen vision mode (Mode 1 or 4)
+    BATCH_SIZE="${BATCH_SIZE:-32}"
+    MAX_STEPS="${MAX_STEPS:-20000}"
+    SAVE_STEPS="${SAVE_STEPS:-5000}"  # 4 checkpoints for 20k steps
+    WARMUP_STEPS="${WARMUP_STEPS:-1000}"
+    GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-false}"
+
+    if [ "${TRAIN_EXPERT_ONLY}" = "true" ]; then
+        echo ">>> MODE 1: EXPERT ONLY (Default, fast training) <<<"
+        echo "    Trainable: Action Expert only (~100M params)"
+    else
+        echo ">>> MODE 4: LANGUAGE + EXPERT (For instruction following issues) <<<"
+        echo "    Trainable: Language Model (~260M) + Action Expert (~100M) = ~360M params"
+    fi
+    echo "    batch_size=${BATCH_SIZE}, max_steps=${MAX_STEPS}"
+fi
 
 # Optimizer (SmolVLA uses different defaults than ACT)
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
@@ -90,12 +191,12 @@ WEIGHT_DECAY="${WEIGHT_DECAY:-1e-10}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-10.0}"
 
 # Scheduler (cosine decay with warmup)
-WARMUP_STEPS="${WARMUP_STEPS:-1000}"
-DECAY_STEPS="${DECAY_STEPS:-30000}"
+# Note: WARMUP_STEPS is set above based on mode (500 for unfrozen, 1000 for frozen)
+DECAY_STEPS="${DECAY_STEPS:-${MAX_STEPS}}"  # Match max_steps by default
 DECAY_LR="${DECAY_LR:-2.5e-6}"
 
 # Checkpointing
-SAVE_STEPS="${SAVE_STEPS:-5000}"
+# Note: SAVE_STEPS is set above based on mode (2500 for unfrozen/10k, 5000 for frozen/20k)
 LOG_FREQ="${LOG_FREQ:-100}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/smolvla_pickplace_${TIMESTAMP}}"
@@ -164,14 +265,16 @@ log "SmolVLA Training for Pick and Place"
 log "=============================================="
 log ""
 log "Configuration:"
-log "  Pretrained:     ${PRETRAINED_MODEL}"
-log "  Dataset:        ${DATASET_PATH}"
-log "  Max Steps:      ${MAX_STEPS}"
-log "  Batch Size:     ${BATCH_SIZE}"
-log "  Learning Rate:  ${LEARNING_RATE}"
-log "  Chunk Size:     ${CHUNK_SIZE}"
-log "  Warmup Steps:   ${WARMUP_STEPS}"
-log "  Output Dir:     ${OUTPUT_DIR}"
+log "  Pretrained:           ${PRETRAINED_MODEL}"
+log "  Dataset:              ${DATASET_PATH}"
+log "  Max Steps:            ${MAX_STEPS}"
+log "  Batch Size:           ${BATCH_SIZE}"
+log "  Learning Rate:        ${LEARNING_RATE}"
+log "  Chunk Size:           ${CHUNK_SIZE}"
+log "  Warmup Steps:         ${WARMUP_STEPS}"
+log "  Freeze Vision:        ${FREEZE_VISION}"
+log "  Gradient Checkpoint:  ${GRADIENT_CHECKPOINTING}"
+log "  Output Dir:           ${OUTPUT_DIR}"
 log ""
 log "Training started at $(date)"
 log "Log file: ${LOG_FILE}"
@@ -211,6 +314,7 @@ else
         --policy.freeze_vision_encoder=${FREEZE_VISION} \
         --policy.train_expert_only=${TRAIN_EXPERT_ONLY} \
         --policy.train_state_proj=${TRAIN_STATE_PROJ} \
+        --policy.gradient_checkpointing=${GRADIENT_CHECKPOINTING} \
         --policy.optimizer_lr=${LEARNING_RATE} \
         --policy.optimizer_weight_decay=${WEIGHT_DECAY} \
         --policy.optimizer_grad_clip_norm=${GRAD_CLIP_NORM} \

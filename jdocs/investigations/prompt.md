@@ -45,6 +45,10 @@ warning suppress, etc. also our laptop only have 24vram, how to adjust training/
     --output_dir=outputs/smolvla_unfrozen_vision_$(date +%Y%m%d_%H%M%S) \
     > outputs/smolvla_unfrozen_training.log 2>&1 &
 
+nohup env FREEZE_VISION=false bash jdocs/scripts/train_smolvla_pickplace.sh > /dev/null 2>&1 &
+
+tail -f jdocs/logs/train_smolvla_pickplace_20251225_163013.log
+
   # SmolVLA training
   nohup bash jdocs/scripts/train_smolvla_pickplace.sh > /dev/null 2>&1 &
 
@@ -416,11 +420,15 @@ python jdocs/scripts/infer_smolvla_rtc_trace.py       -c outputs/smolvla_pickpla
       --duration 30
 
   python jdocs/scripts/infer_smolvla_rtc_trace.py \
-      --checkpoint outputs/smolvla_pickplace_20251223_001238/checkpoints/checkpoints/last/pretrained_model \
-      --action-queue-threshold 15 \
-      --execution-horizon 5 \
-      --max-guidance-weight 15.0 \
-      --duration 30
+      --checkpoint outputs/smolvla_pickplace_20251225_163013/checkpoints/010000/pretrained_model \
+      --action-queue-threshold 10 \
+      --execution-horizon 3 \
+      --max-guidance-weight 5.0 \
+      --duration 50
+
+    python jdocs/scripts/infer_smolvla_so101.py \
+    --checkpoint outputs/smolvla_pickplace_20251225_163013/checkpoints/010000/pretrained_model \
+    --task "pick up the block and place it on the plate"
 
     python jdocs/scripts/analyze_inference_trace.py \
       --trace-dir outputs/inference_traces/trace_smolvla_20251224_142451 \

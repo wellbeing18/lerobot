@@ -544,6 +544,7 @@ class VLAFlowMatching(nn.Module):
             num_vlm_layers=self.config.num_vlm_layers,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
+            gradient_checkpointing=self.config.gradient_checkpointing,
             device=self.config.device if self.config.device is not None else "auto",
         )
         self.state_proj = nn.Linear(

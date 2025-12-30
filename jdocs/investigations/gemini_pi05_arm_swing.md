@@ -89,3 +89,6 @@ To resolve the erratic behavior, the inference pipeline should be restructured f
 The Pi0.5 model is likely trained correctly, but the **`infer_pi05_rtc_trace.py` script contains a mathematical error** in how it compensates for inference delay. By skipping actions based on a stalled index counter, it forces the robot to make impossible physical jumps, resulting in the observed "crazy" swinging behavior. Fixing the `ActionQueue` logic is the highest priority.
 
 
+
+
+

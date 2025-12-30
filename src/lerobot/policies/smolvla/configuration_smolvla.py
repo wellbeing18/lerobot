@@ -72,6 +72,7 @@ class SmolVLAConfig(PreTrainedConfig):
     freeze_vision_encoder: bool = True
     train_expert_only: bool = True
     train_state_proj: bool = True
+    gradient_checkpointing: bool = False
 
     # Training presets
     optimizer_lr: float = 1e-4

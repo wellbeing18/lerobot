@@ -70,6 +70,7 @@ class SmolVLMWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
+        gradient_checkpointing: bool = False,
         device: str = "auto",
     ):
         super().__init__()
@@ -131,6 +132,18 @@ class SmolVLMWithExpertModel(nn.Module):
         self.train_expert_only = train_expert_only
         self.attention_mode = attention_mode
         self.expert_hidden_size = lm_expert_config.hidden_size
+        self.gradient_checkpointing = gradient_checkpointing
+        if self.gradient_checkpointing:
+            try:
+                self.vlm.gradient_checkpointing_enable()
+                print("Gradient checkpointing enabled for VLM")
+            except AttributeError:
+                print("Warning: VLM does not support gradient checkpointing")
+            try:
+                self.lm_expert.gradient_checkpointing_enable()
+                print("Gradient checkpointing enabled for LM Expert")
+            except AttributeError:
+                print("Warning: LM Expert does not support gradient checkpointing")
         self.set_requires_grad()
 
     def get_vlm_model(self):
@@ -142,8 +155,10 @@ class SmolVLMWithExpertModel(nn.Module):
             for params in self.get_vlm_model().vision_model.parameters():
                 params.requires_grad = False
         if self.train_expert_only:
-            self.vlm.eval()
-            for params in self.vlm.parameters():
+            # Freeze VLM components but respect freeze_vision_encoder
+            for name, params in self.vlm.named_parameters():
+                if not self.freeze_vision_encoder and "vision_model" in name:
+                    continue
                 params.requires_grad = False
         else:
             # To avoid unused params issue with distributed training
@@ -168,6 +183,19 @@ class SmolVLMWithExpertModel(nn.Module):
             if "lm_head" in name:
                 params.requires_grad = False
 
+        # Log trainable components for verification
+        vision_trainable = sum(p.numel() for p in self.get_vlm_model().vision_model.parameters() if p.requires_grad)
+        vlm_trainable = sum(p.numel() for p in self.vlm.parameters() if p.requires_grad)
+        expert_trainable = sum(p.numel() for p in self.lm_expert.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in self.parameters())
+        total_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print(f"SmolVLA trainable parameters:")
+        print(f"  Vision encoder: {vision_trainable:,} params {'(UNFROZEN)' if vision_trainable > 0 else '(frozen)'}")
+        print(f"  VLM (including vision): {vlm_trainable:,} params")
+        print(f"  Action expert: {expert_trainable:,} params")
+        print(f"  Total: {total_trainable:,} / {total_params:,} ({100*total_trainable/total_params:.1f}%)")
+
     def train(self, mode: bool = True):
         super().train(mode)
 
@@ -175,7 +203,13 @@ class SmolVLMWithExpertModel(nn.Module):
             self.get_vlm_model().vision_model.eval()
 
         if self.train_expert_only:
+            # When train_expert_only is true, we keep VLM in eval mode
+            # unless we specifically unfroze vision.
+            # However, vision_model is already handled by freeze_vision_encoder above.
+            # For the text part of VLM, it should stay in eval.
             self.vlm.eval()
+            if not self.freeze_vision_encoder:
+                self.get_vlm_model().vision_model.train(mode)
 
     def embed_image(self, image: torch.Tensor):
         patch_attention_mask = None

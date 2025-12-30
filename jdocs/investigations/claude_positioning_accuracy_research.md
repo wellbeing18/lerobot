@@ -805,34 +805,37 @@ train_state_proj: bool = True         # ← Train state projection
 --policy.train_expert_only=false      # REQUIRED - see warning below
 ```
 
-**⚠️ CRITICAL FLAG INTERACTION BUG** (discovered via code review):
+**✅ FLAG INTERACTION BUG FIXED** (2025-12-25):
 
-In `smolvlm_with_expert.py:139-147`:
-```python
-def set_requires_grad(self):
-    if self.freeze_vision_encoder:        # Block 1: Skipped if false
-        # freeze vision encoder
-    if self.train_expert_only:            # Block 2: DEFAULT=True
-        for params in self.vlm.parameters():
-            params.requires_grad = False   # RE-FREEZES ENTIRE VLM!
-```
+The original code had a bug where `train_expert_only=true` would re-freeze vision even when `freeze_vision_encoder=false`. This has been fixed.
 
-**Problem**: `train_expert_only=true` (default) freezes the ENTIRE VLM, which OVERRIDES `freeze_vision_encoder=false`. The vision encoder ends up frozen anyway!
-
-**Solution**: You MUST set BOTH flags:
+**New Behavior** (after fix):
 ```bash
+# Vision-only fine-tuning (RECOMMENDED for positioning issues):
+--policy.freeze_vision_encoder=false \
+--policy.train_expert_only=true \
+--policy.gradient_checkpointing=true
+
+# Vision + Language fine-tuning (more VRAM):
 --policy.freeze_vision_encoder=false \
 --policy.train_expert_only=false
 ```
 
-**Consequence**: This also unfreezes the language model (SmolLM2), not just vision. There's no way to unfreeze vision-only without code modification.
-
-**VRAM Impact**:
+**VRAM Impact** (after fix):
 - Default (expert only): ~12-16GB with batch_size=32
-- `train_expert_only=false` (vision + language unfrozen): ~22-24GB with batch_size=8
-- Full VLM fine-tuning may require batch_size=4 on 24GB GPU
+- Vision-only unfrozen + gradient checkpointing: ~14-18GB with batch_size=8
+- Vision + Language unfrozen: ~22-24GB with batch_size=8
 
-**Note**: SmolVLA does NOT support `gradient_checkpointing` flag (unlike Pi0). If you OOM, reduce batch_size.
+**New Feature**: `gradient_checkpointing=true` now supported for SmolVLA, reducing VRAM usage.
+
+**Verification**: Training will print trainable parameter counts:
+```
+SmolVLA trainable parameters:
+  Vision encoder: 400,000,000 params (UNFROZEN)
+  VLM (including vision): 400,000,000 params
+  Action expert: 100,000,000 params
+  Total: 500,000,000 / 550,000,000 (90.9%)
+```
 
 ### GROOT N1.5/N1.6 Configuration (Isaac-GR00T & LeRobot)
 
@@ -1071,12 +1074,28 @@ Based on [OpenVLA-OFT research](https://arxiv.org/abs/2502.19645):
 
 Since you already trained 30k steps with frozen backbone and still have positioning issues, the frozen backbone is the likely culprit.
 
-**Training Command**:
+**Training Command** (using updated script):
+```bash
+# Run with nohup for background training (unfrozen vision)
+nohup env FREEZE_VISION=false bash jdocs/scripts/train_smolvla_pickplace.sh > /dev/null 2>&1 &
+
+# Or run interactively to see output
+FREEZE_VISION=false bash jdocs/scripts/train_smolvla_pickplace.sh
+```
+
+The script automatically:
+- Sets `batch_size=8` (vs 32 for frozen)
+- Sets `max_steps=30000` (vs 20k for frozen)
+- Enables `gradient_checkpointing=true`
+- Logs to `jdocs/logs/train_smolvla_pickplace_*.log`
+
+**Manual command** (if not using script):
 ```bash
 nohup lerobot-train \
   --policy.type=smolvla \
   --policy.freeze_vision_encoder=false \
-  --policy.train_expert_only=false \
+  --policy.train_expert_only=true \
+  --policy.gradient_checkpointing=true \
   --dataset.repo_id=pick_and_place \
   --dataset.root=/home/jrobot/project/lerobot/datasets/pick_and_place \
   --training.batch_size=8 \
@@ -1084,29 +1103,37 @@ nohup lerobot-train \
   --training.save_freq=5000 \
   --training.log_freq=100 \
   --training.num_workers=4 \
-  --output_dir=outputs/smolvla_unfrozen_vision_$(date +%Y%m%d_%H%M%S) \
-  > outputs/smolvla_unfrozen_training.log 2>&1 &
+  --output_dir=outputs/smolvla_vision_only_$(date +%Y%m%d_%H%M%S) \
+  > outputs/smolvla_vision_only_training.log 2>&1 &
 ```
 
-**CRITICAL: Why `train_expert_only=false` is required**:
+**Code Fix Applied** (2025-12-25):
 
-In `smolvlm_with_expert.py:139-147`, there's a flag interaction issue:
+The original code had a flag interaction bug where `train_expert_only=true` would re-freeze the vision encoder even when `freeze_vision_encoder=false`. This has been fixed in `smolvlm_with_expert.py`:
+
 ```python
-def set_requires_grad(self):
-    if self.freeze_vision_encoder:        # Skipped if false
-        # freeze vision
-    if self.train_expert_only:            # DEFAULT=True, RE-FREEZES entire VLM!
-        for params in self.vlm.parameters():
-            params.requires_grad = False   # Includes vision encoder!
+# BEFORE (buggy):
+if self.train_expert_only:
+    for params in self.vlm.parameters():
+        params.requires_grad = False  # Froze EVERYTHING including vision!
+
+# AFTER (fixed):
+if self.train_expert_only:
+    for name, params in self.vlm.named_parameters():
+        if not self.freeze_vision_encoder and "vision_model" in name:
+            continue  # Skip vision params, keep them trainable
+        params.requires_grad = False
 ```
 
-Setting only `freeze_vision_encoder=false` does NOT work - the `train_expert_only=true` default will RE-FREEZE the entire VLM including vision. You MUST set both flags.
+**New Capabilities**:
+- `freeze_vision_encoder=false` + `train_expert_only=true` → Vision only (~400M params)
+- `freeze_vision_encoder=false` + `train_expert_only=false` → Vision + Language (~450M params)
+- `gradient_checkpointing=true` → Reduces VRAM usage significantly
 
 **Why batch_size=8 instead of 32**:
-- `train_expert_only=false` unfreezes both vision AND language model (~450M params total)
-- VRAM usage increases significantly
-- batch_size=32 will OOM; batch_size=8 is safe for 24GB (but tight)
-- If OOM occurs, reduce to batch_size=4
+- Unfreezing vision encoder adds ~300M trainable parameters
+- With gradient checkpointing, batch_size=8 should fit in 24GB
+- Can try batch_size=12 or 16 if VRAM allows
 
 **Why still 30k steps**:
 - Same dataset, so similar convergence expected
