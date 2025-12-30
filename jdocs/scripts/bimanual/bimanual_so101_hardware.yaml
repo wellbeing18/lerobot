@@ -1,0 +1,82 @@
+# Hardware configuration for BiSO101 Bimanual Inference
+# This config is used by the bimanual inference scripts for xVLA and SmolVLA.
+#
+# Key differences from single arm:
+#   - Two robot arms (left and right) with separate serial ports
+#   - Optional third camera (right_wrist)
+#   - 12 DOF total action space (6 per arm)
+#
+# Customize the port values for your hardware setup.
+
+robot:
+  type: bi_so101_follower
+  id: xlerobot_bimanual
+
+  # Left arm configuration
+  left_arm:
+    port: /dev/ttyACM0  # CUSTOMIZE: Set your left arm port
+    use_degrees: true
+    disable_torque_on_disconnect: true
+
+  # Right arm configuration
+  right_arm:
+    port: /dev/ttyACM1  # CUSTOMIZE: Set your right arm port
+    use_degrees: true
+    disable_torque_on_disconnect: true
+
+cameras:
+  # Head camera (overhead/third-person view)
+  head:
+    type: opencv
+    index_or_path: 4      # CUSTOMIZE: Camera device index
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
+
+  # Left wrist camera (attached to left arm)
+  left_wrist:
+    type: opencv
+    index_or_path: 6      # CUSTOMIZE: Camera device index
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
+
+  # Right wrist camera (attached to right arm) - OPTIONAL
+  # Uncomment if using 3-camera setup
+  # right_wrist:
+  #   type: opencv
+  #   index_or_path: 8    # CUSTOMIZE: Camera device index
+  #   width: 640
+  #   height: 480
+  #   fps: 30
+  #   fourcc: MJPG
+
+inference:
+  # Action horizon: how many actions the model predicts at once
+  action_horizon: 50
+  # Control frequency (30 Hz)
+  action_interval: 0.033
+  # Maximum episode duration in seconds
+  default_duration: 60
+  # Device for inference
+  device: cuda
+
+# Joint names for reference (order matters for action vector)
+# Bimanual: 12 DOF total (6 per arm)
+joints:
+  # Left arm (indices 0-5)
+  - left_shoulder_pan.pos
+  - left_shoulder_lift.pos
+  - left_elbow_flex.pos
+  - left_wrist_flex.pos
+  - left_wrist_roll.pos
+  - left_gripper.pos
+  # Right arm (indices 6-11)
+  - right_shoulder_pan.pos
+  - right_shoulder_lift.pos
+  - right_elbow_flex.pos
+  - right_wrist_flex.pos
+  - right_wrist_roll.pos
+  - right_gripper.pos
