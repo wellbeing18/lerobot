@@ -153,7 +153,7 @@ ARM_CONFIGS = {
     "left": {
         "robot": {
             "type": "so101_follower",
-            "port": "/dev/ttyACM2",  # left follower
+            "port": "/dev/ttyACM3",  # left follower
             "id": "xlerobot_left_arm",
         },
         "teleop": {
@@ -170,12 +170,12 @@ ARM_CONFIGS = {
     "right": {
         "robot": {
             "type": "so101_follower",
-            "port": "/dev/ttyACM1",  # right follower
+            "port": "/dev/ttyACM2",  # right follower
             "id": "xlerobot_right_arm",
         },
         "teleop": {
             "type": "so101_leader",
-            "port": "/dev/ttyACM3",  # right leader
+            "port": "/dev/ttyACM1",  # right leader
             "id": "xlerobot_right_leader",
         },
         "cameras": {
@@ -188,8 +188,8 @@ ARM_CONFIGS = {
     "bimanual": {
         "robot": {
             "type": "bi_so101_follower",
-            "left_arm_port": "/dev/ttyACM2",   # left follower
-            "right_arm_port": "/dev/ttyACM1",  # right follower
+            "left_arm_port": "/dev/ttyACM3",   # left follower
+            "right_arm_port": "/dev/ttyACM2",  # right follower
             "id": "xlerobot_bimanual",
             # Use existing calibration IDs
             "left_arm_id": "xlerobot_left_arm",
@@ -198,7 +198,7 @@ ARM_CONFIGS = {
         "teleop": {
             "type": "bi_so101_leader",
             "left_arm_port": "/dev/ttyACM0",   # left leader
-            "right_arm_port": "/dev/ttyACM3",  # right leader
+            "right_arm_port": "/dev/ttyACM1",  # right leader
             "id": "xlerobot_bimanual_leader",
             # Use existing calibration IDs
             "left_arm_id": "xlerobot_left_leader",
@@ -331,35 +331,58 @@ TASK_PRESETS = {
             "Complete transfer (35-45s)"
         ]
     },
-    "bimanual_pick": {
-        "template": "pick up the {object} using both arms",
-        "episode_time_s": 40,
-        "reset_time_s": 25,
-        "recommended_episodes": 1,
-        "default_object": "large object",
-        "description": "BIMANUAL: Coordinated two-arm grasp for large objects",
+    "bimanual_pick_and_place": {
+        "template": "pick up the {object} and place it on the {target}",
+        "episode_time_s": 60,
+        "reset_time_s": 30,
+        "recommended_episodes": 50,
+        "default_object": "tissue packet",
+        "default_target": "plate",
+        "description": "BIMANUAL: Full pick-and-place with both arms coordinated",
         "requires_bimanual": True,
         "phases": [
-            "Both arms approach (0-12s)",
-            "Coordinate grasp (12-22s)",
-            "Lift together (22-32s)",
-            "Hold stable (32-40s)"
+            "Approach (0-10s)",
+            "Grasp (10-20s)",
+            "Lift (20-30s)",
+            "Transport (30-45s)",
+            "Place (45-55s)",
+            "Release (55-60s)"
         ]
     },
-    "bimanual_place": {
-        "template": "place the {object} on the {target} using both arms",
-        "episode_time_s": 45,
-        "reset_time_s": 25,
-        "recommended_episodes": 30,
-        "default_object": "large object",
-        "default_target": "table",
-        "description": "BIMANUAL: Coordinated two-arm placement",
+    "left_arm_pick_and_place": {
+        "template": "Left arm pick up the {object} and place it on the {target}",
+        "episode_time_s": 60,
+        "reset_time_s": 30,
+        "recommended_episodes": 10,
+        "default_object": "tissue packet",
+        "default_target": "plate",
+        "description": "BIMANUAL: Left arm only pick-and-place (right arm stays idle)",
         "requires_bimanual": True,
         "phases": [
-            "Transport together (0-15s)",
-            "Lower coordinated (15-28s)",
-            "Release together (28-38s)",
-            "Retract both (38-45s)"
+            "Left arm approach (0-10s)",
+            "Left arm grasp (10-20s)",
+            "Left arm lift (20-30s)",
+            "Left arm transport (30-45s)",
+            "Left arm place (45-55s)",
+            "Left arm release (55-60s)"
+        ]
+    },
+    "right_arm_pick_and_place": {
+        "template": "Right arm pick up the {object} and place it on the {target}",
+        "episode_time_s": 60,
+        "reset_time_s": 30,
+        "recommended_episodes": 10,
+        "default_object": "tissue packet",
+        "default_target": "plate",
+        "description": "BIMANUAL: Right arm only pick-and-place (left arm stays idle)",
+        "requires_bimanual": True,
+        "phases": [
+            "Right arm approach (0-10s)",
+            "Right arm grasp (10-20s)",
+            "Right arm lift (20-30s)",
+            "Right arm transport (30-45s)",
+            "Right arm place (45-55s)",
+            "Right arm release (55-60s)"
         ]
     }
 }
@@ -368,7 +391,8 @@ TASK_PRESETS = {
 OBJECT_VOCABULARY = [
     "cube", "block", "object",
     "red cube", "blue cube", "green cube",
-    "small cube", "large cube"
+    "small cube", "large cube",
+    "tissue packet", "tissue pack", "packet"
 ]
 
 LOCATION_VOCABULARY = [
@@ -526,12 +550,17 @@ def build_task_string(task_type: str, **kwargs) -> str:
     elif task_type == "handover":
         obj = kwargs.get("object", preset.get("default_object", "cube"))
         return template.format(object=obj)
-    elif task_type == "bimanual_pick":
-        obj = kwargs.get("object", preset.get("default_object", "large object"))
-        return template.format(object=obj)
-    elif task_type == "bimanual_place":
-        obj = kwargs.get("object", preset.get("default_object", "large object"))
-        target = kwargs.get("target", preset.get("default_target", "table"))
+    elif task_type == "bimanual_pick_and_place":
+        obj = kwargs.get("object", preset.get("default_object", "tissue packet"))
+        target = kwargs.get("target", preset.get("default_target", "plate"))
+        return template.format(object=obj, target=target)
+    elif task_type == "left_arm_pick_and_place":
+        obj = kwargs.get("object", preset.get("default_object", "tissue packet"))
+        target = kwargs.get("target", preset.get("default_target", "plate"))
+        return template.format(object=obj, target=target)
+    elif task_type == "right_arm_pick_and_place":
+        obj = kwargs.get("object", preset.get("default_object", "tissue packet"))
+        target = kwargs.get("target", preset.get("default_target", "plate"))
         return template.format(object=obj, target=target)
     else:
         raise ValueError(f"Unknown task type: {task_type}")
