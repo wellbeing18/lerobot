@@ -32,6 +32,12 @@
 #   - REQUIRES LoRA for 24GB VRAM (full fine-tune needs ~48GB)
 #   - Lower default learning rate (2.5e-5 vs 1e-4)
 #
+# LoRA Hyperparameters (IMPORTANT - matches OpenPI's tested defaults):
+#   - lora_rank=16, lora_alpha=16 → scaling factor = 1.0
+#   - lora_dropout=0.0 (no dropout)
+#   - These match OpenPI JAX's production-tested values
+#   - Previous defaults (alpha=32, dropout=0.1) caused training failures
+#
 # Memory requirements:
 #   - Full fine-tuning: ~48GB VRAM (not possible on 24GB)
 #   - LoRA (default): ~16-20GB VRAM (works on 24GB)
@@ -123,13 +129,36 @@ DTYPE="${DTYPE:-bfloat16}"
 # LoRA reduces trainable params from 4B to ~40M (1%), enabling 24GB training
 USE_LORA="${USE_LORA:-true}"
 LORA_RANK="${LORA_RANK:-16}"        # Rank 16 recommended for 24GB (higher = more params)
-LORA_ALPHA="${LORA_ALPHA:-32}"      # Typically 2x rank
-LORA_DROPOUT="${LORA_DROPOUT:-0.1}" # Regularization
+# IMPORTANT: alpha=rank matches OpenPI's tested defaults (scaling factor = 1.0)
+# Previous alpha=32 caused 2x scaling, leading to catastrophic forgetting
+LORA_ALPHA="${LORA_ALPHA:-16}"      # Match OpenPI: alpha = rank (scaling = 1.0)
+# IMPORTANT: OpenPI uses no dropout in LoRA - dropout can destabilize small LoRA updates
+LORA_DROPOUT="${LORA_DROPOUT:-0.0}" # Match OpenPI: no dropout
 
 # Normalization (Pi0.5 uses QUANTILES by default)
 # If your dataset doesn't have quantile stats, use MEAN_STD:
 # NORMALIZATION_MODE="MEAN_STD"
 NORMALIZATION_MODE="${NORMALIZATION_MODE:-QUANTILES}"
+
+# =============================================================================
+# Training Augmentations (matches OpenPI preprocessing)
+# =============================================================================
+# OpenPI applies augmentations during training for better generalization.
+# Geometric (non-wrist cameras): crop (95%), rotation (±5°)
+# Color (all cameras): brightness, contrast, saturation jitter
+#
+# Set ENABLE_AUGMENTATIONS=false to disable (not recommended)
+ENABLE_AUGMENTATIONS="${ENABLE_AUGMENTATIONS:-true}"
+
+# Augmentation parameters (can override via environment)
+export AUG_CROP_SCALE="${AUG_CROP_SCALE:-0.95}"
+export AUG_ROTATION_DEGREES="${AUG_ROTATION_DEGREES:-5.0}"
+export AUG_BRIGHTNESS_MIN="${AUG_BRIGHTNESS_MIN:-0.7}"
+export AUG_BRIGHTNESS_MAX="${AUG_BRIGHTNESS_MAX:-1.3}"
+export AUG_CONTRAST_MIN="${AUG_CONTRAST_MIN:-0.6}"
+export AUG_CONTRAST_MAX="${AUG_CONTRAST_MAX:-1.4}"
+export AUG_SATURATION_MIN="${AUG_SATURATION_MIN:-0.5}"
+export AUG_SATURATION_MAX="${AUG_SATURATION_MAX:-1.5}"
 
 # Checkpointing
 SAVE_STEPS="${SAVE_STEPS:-1000}"
@@ -224,7 +253,17 @@ log "  Compile Model:         ${COMPILE_MODEL}"
 log "  Dtype:                 ${DTYPE}"
 log "  Use LoRA:              ${USE_LORA}"
 log "  LoRA Rank:             ${LORA_RANK}"
+log "  LoRA Alpha:            ${LORA_ALPHA} (scaling=${LORA_ALPHA}/${LORA_RANK})"
+log "  LoRA Dropout:          ${LORA_DROPOUT}"
 log "  Normalization:         ${NORMALIZATION_MODE}"
+log "  Augmentations:         ${ENABLE_AUGMENTATIONS}"
+if [ "${ENABLE_AUGMENTATIONS}" = "true" ]; then
+    log "    Crop Scale:          ${AUG_CROP_SCALE}"
+    log "    Rotation:            +/- ${AUG_ROTATION_DEGREES} degrees"
+    log "    Brightness:          [${AUG_BRIGHTNESS_MIN}, ${AUG_BRIGHTNESS_MAX}]"
+    log "    Contrast:            [${AUG_CONTRAST_MIN}, ${AUG_CONTRAST_MAX}]"
+    log "    Saturation:          [${AUG_SATURATION_MIN}, ${AUG_SATURATION_MAX}]"
+fi
 log "  Output Dir:            ${OUTPUT_DIR}"
 log ""
 log "Training started at $(date)"
@@ -233,7 +272,16 @@ log ""
 
 # Build the training command
 # Pi0.5 uses --policy.type=pi05 and --policy.pretrained_path for model loading
-CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning -m lerobot.scripts.lerobot_train \
+#
+# If augmentations are enabled, use the wrapper script that patches Pi0.5 preprocessing
+if [ "${ENABLE_AUGMENTATIONS}" = "true" ]; then
+    export ENABLE_AUGMENTATIONS
+    TRAIN_CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning ${SCRIPT_DIR}/train_pi05_with_augmentations.py"
+else
+    TRAIN_CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::DeprecationWarning -m lerobot.scripts.lerobot_train"
+fi
+
+CMD="${TRAIN_CMD} \
     --dataset.repo_id=${DATASET_NAME} \
     --dataset.root=${DATASET_PATH} \
     --dataset.video_backend=pyav \
