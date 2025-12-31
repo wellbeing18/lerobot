@@ -18,13 +18,13 @@ robot:
 
   # Left arm configuration
   left_arm:
-    port: /dev/ttyACM2  # Left Follower port (from bimanual_setup_session.md)
+    port: /dev/ttyACM3  # Left Follower port (from actual data collection config)
     use_degrees: true
     disable_torque_on_disconnect: true
 
   # Right arm configuration
   right_arm:
-    port: /dev/ttyACM1  # Right Follower port (from bimanual_setup_session.md)
+    port: /dev/ttyACM2  # Right Follower port (from actual data collection config)
     use_degrees: true
     disable_torque_on_disconnect: true
 
