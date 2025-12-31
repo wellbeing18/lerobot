@@ -12,15 +12,19 @@ robot:
   type: bi_so101_follower
   id: xlerobot_bimanual
 
+  # Calibration IDs (reuse existing calibration files)
+  left_arm_id: xlerobot_left_arm
+  right_arm_id: xlerobot_right_arm
+
   # Left arm configuration
   left_arm:
-    port: /dev/ttyACM0  # CUSTOMIZE: Set your left arm port
+    port: /dev/ttyACM2  # Left Follower port (from bimanual_setup_session.md)
     use_degrees: true
     disable_torque_on_disconnect: true
 
   # Right arm configuration
   right_arm:
-    port: /dev/ttyACM1  # CUSTOMIZE: Set your right arm port
+    port: /dev/ttyACM1  # Right Follower port (from bimanual_setup_session.md)
     use_degrees: true
     disable_torque_on_disconnect: true
 
@@ -37,21 +41,20 @@ cameras:
   # Left wrist camera (attached to left arm)
   left_wrist:
     type: opencv
-    index_or_path: 6      # CUSTOMIZE: Camera device index
+    index_or_path: 8      # /dev/video8 (from bimanual_setup_session.md)
     width: 640
     height: 480
     fps: 30
     fourcc: MJPG
 
-  # Right wrist camera (attached to right arm) - OPTIONAL
-  # Uncomment if using 3-camera setup
-  # right_wrist:
-  #   type: opencv
-  #   index_or_path: 8    # CUSTOMIZE: Camera device index
-  #   width: 640
-  #   height: 480
-  #   fps: 30
-  #   fourcc: MJPG
+  # Right wrist camera (attached to right arm)
+  right_wrist:
+    type: opencv
+    index_or_path: 6      # /dev/video6 (from bimanual_setup_session.md)
+    width: 640
+    height: 480
+    fps: 30
+    fourcc: MJPG
 
 inference:
   # Action horizon: how many actions the model predicts at once
