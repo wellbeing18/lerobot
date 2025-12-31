@@ -164,7 +164,8 @@ ARM_CONFIGS = {
         "cameras": {
             # Using MJPG (compressed) to reduce USB bandwidth: ~3 MB/s vs ~28 MB/s raw
             "left_wrist": {"type": "opencv", "index_or_path": 8, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"},
-            "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"}
+            # Head camera: capture at 800x600, crop to 640x480, offset=60 removes all 120px from top (max without side zoom)
+            "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 800, "capture_height": 600, "crop_y_offset": 60, "fps": 30, "fourcc": "MJPG"}
         }
     },
     "right": {
@@ -181,7 +182,8 @@ ARM_CONFIGS = {
         "cameras": {
             # Using MJPG (compressed) to reduce USB bandwidth: ~3 MB/s vs ~28 MB/s raw
             "right_wrist": {"type": "opencv", "index_or_path": 6, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"},
-            "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"}
+            # Head camera: capture at 800x600, crop to 640x480, offset=60 removes all 120px from top (max without side zoom)
+            "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 800, "capture_height": 600, "crop_y_offset": 60, "fps": 30, "fourcc": "MJPG"}
         }
     },
     # BIMANUAL configuration - controls both arms simultaneously
@@ -206,7 +208,8 @@ ARM_CONFIGS = {
         },
         "cameras": {
             # All 3 cameras for bimanual operation
-            "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"},
+            # Head camera: capture at 800x600, crop to 640x480, offset=60 removes all 120px from top (max without side zoom)
+            "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 800, "capture_height": 600, "crop_y_offset": 60, "fps": 30, "fourcc": "MJPG"},
             "left_wrist": {"type": "opencv", "index_or_path": 8, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"},
             "right_wrist": {"type": "opencv", "index_or_path": 6, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"}
         },
@@ -335,7 +338,7 @@ TASK_PRESETS = {
         "template": "pick up the {object} and place it on the {target}",
         "episode_time_s": 60,
         "reset_time_s": 30,
-        "recommended_episodes": 50,
+        "recommended_episodes": 1,
         "default_object": "tissue packet",
         "default_target": "plate",
         "description": "BIMANUAL: Full pick-and-place with both arms coordinated",

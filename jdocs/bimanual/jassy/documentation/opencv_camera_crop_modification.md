@@ -1,17 +1,20 @@
-# OpenCV Camera Digital Zoom Feature Modification
+# OpenCV Camera Crop Feature Modification
 
 **Date**: 2024-12-31
-**Purpose**: Add digital zoom (center crop) functionality to LeRobot's OpenCV camera for the head camera
+**Purpose**: Add digital crop functionality to LeRobot's OpenCV camera for the head camera to remove unwanted top portion of frame (simulates tilting camera down)
 
 ## Overview
 
-This modification adds `capture_width` and `capture_height` parameters to the OpenCV camera configuration, allowing you to capture at a higher resolution and center crop to the output `width` x `height` for an effective "zoom" effect.
+This modification adds three parameters to the OpenCV camera configuration:
+- `capture_width` / `capture_height` - Capture at a different resolution than output
+- `crop_y_offset` - Offset the crop region vertically (positive = remove more from top)
 
-**Use case**: Head camera mounted high captures too much background. By capturing at 1280x960 and cropping center 640x480, we get ~2x zoom.
+**Current use case**: Head camera mounted high captures too much background/ceiling. By capturing at 800x600 and cropping to 640x480 with `crop_y_offset=60`, we remove the top 120 pixels (20% of frame), effectively "tilting" the camera down without physical adjustment.
 
-**Key concept**:
+**Key concepts**:
 - `width` / `height` = **OUTPUT** dimensions (what goes to dataset, what model sees)
 - `capture_width` / `capture_height` = **CAPTURE** dimensions (camera hardware resolution)
+- `crop_y_offset` = Vertical offset from center crop (positive = remove more from top)
 
 ## Files Modified
 
@@ -115,11 +118,13 @@ class OpenCVCameraConfig(CameraConfig):
 
 ### Changes Made
 
-1. Added two new optional fields after `fourcc`:
+1. Added three new fields after `fourcc`:
    ```python
    # For digital zoom: capture at higher resolution, then center crop to width x height
    capture_width: int | None = None
    capture_height: int | None = None
+   # Offset crop from center: positive = remove more from top, negative = remove more from bottom
+   crop_y_offset: int = 0
    ```
 
 2. Added validation in `__post_init__()`:
@@ -236,6 +241,7 @@ def _postprocess_image(self, image: NDArray[Any], color_mode: ColorMode | None =
    # If capture_width/capture_height are set, use those for camera capture
    # Otherwise capture at width x height (no crop)
    self.do_center_crop = config.capture_width is not None and config.capture_height is not None
+   self.crop_y_offset = config.crop_y_offset
 
    if self.height and self.width:
        if self.do_center_crop:
@@ -250,14 +256,17 @@ def _postprocess_image(self, image: NDArray[Any], color_mode: ColorMode | None =
                self.capture_width, self.capture_height = self.height, self.width
    ```
 
-2. **In `_postprocess_image`**: Added center crop logic after color conversion, before rotation:
+2. **In `_postprocess_image`**: Added crop logic after color conversion, before rotation:
    ```python
    # Apply center crop if configured (for digital zoom effect)
    # Crop from capture resolution to output resolution (self.width x self.height)
+   # crop_y_offset: positive = remove more from top, negative = remove more from bottom
    if self.do_center_crop:
        h, w = processed_image.shape[:2]
        crop_x = (w - self.width) // 2
-       crop_y = (h - self.height) // 2
+       crop_y = (h - self.height) // 2 + self.crop_y_offset
+       # Clamp to valid range
+       crop_y = max(0, min(crop_y, h - self.height))
        processed_image = processed_image[
            crop_y : crop_y + self.height,
            crop_x : crop_x + self.width
@@ -274,10 +283,20 @@ def _postprocess_image(self, image: NDArray[Any], color_mode: ColorMode | None =
 "head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"}
 ```
 
-### New head camera config (with ~2x zoom)
+### Current head camera config (crop top, minimal zoom)
 
 ```python
-"head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 1280, "capture_height": 960, "fps": 30, "fourcc": "MJPG"}
+"head": {
+    "type": "opencv",
+    "index_or_path": 4,
+    "width": 640,
+    "height": 480,
+    "capture_width": 800,
+    "capture_height": 600,
+    "crop_y_offset": 60,
+    "fps": 30,
+    "fourcc": "MJPG"
+}
 ```
 
 Updated in 3 locations:
@@ -299,11 +318,11 @@ git checkout HEAD -- src/lerobot/cameras/opencv/camera_opencv.py
 ### Option 2: Manual revert
 
 **For configuration_opencv.py**:
-1. Remove the `capture_width` and `capture_height` field definitions
+1. Remove the `capture_width`, `capture_height`, and `crop_y_offset` field definitions
 2. Remove the capture dimension validation block in `__post_init__`
 
 **For camera_opencv.py**:
-1. Remove `self.do_center_crop` and the if/else block that uses `config.capture_width`
+1. Remove `self.do_center_crop`, `self.crop_y_offset` and the if/else block that uses `config.capture_width`
 2. Restore the original capture dimension logic:
    ```python
    if self.height and self.width:
@@ -311,54 +330,78 @@ git checkout HEAD -- src/lerobot/cameras/opencv/camera_opencv.py
        if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
            self.capture_width, self.capture_height = self.height, self.width
    ```
-3. Remove the center crop block in `_postprocess_image`
+3. Remove the crop block in `_postprocess_image`
 
 **For collect_bimanuel_xlerobot_data.py**:
-Remove `capture_width` and `capture_height` from all head camera configs.
+Remove `capture_width`, `capture_height`, and `crop_y_offset` from all head camera configs.
 
 ---
 
-## Usage After Modification
+## Usage Guide
 
-### Config format
+### Config Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `width` | Output width (what goes to dataset) | Required |
+| `height` | Output height (what goes to dataset) | Required |
+| `capture_width` | Camera capture width (must be >= width) | None (same as width) |
+| `capture_height` | Camera capture height (must be >= height) | None (same as height) |
+| `crop_y_offset` | Vertical crop offset: + = remove more from top | 0 (center crop) |
+
+### Current Configuration Explained
 
 ```python
-# No zoom (normal capture)
-"camera_name": {
-    "type": "opencv",
-    "index_or_path": 4,
-    "width": 640,      # Output dimensions
-    "height": 480,
-    "fps": 30,
-    "fourcc": "MJPG"
-}
-
-# With ~2x digital zoom
-"camera_name": {
-    "type": "opencv",
-    "index_or_path": 4,
-    "width": 640,            # Output dimensions (what goes to dataset)
-    "height": 480,
-    "capture_width": 1280,   # Capture at higher resolution
-    "capture_height": 960,   # Must be >= width/height
-    "fps": 30,
-    "fourcc": "MJPG"
+"head": {
+    "width": 640, "height": 480,           # Output: 640x480
+    "capture_width": 800, "capture_height": 600,  # Capture: 800x600
+    "crop_y_offset": 60,                   # Remove 120px from top (all vertical excess)
+    ...
 }
 ```
 
-### How it works
+**What happens:**
+1. Camera captures at 800x600
+2. Horizontal: 800 - 640 = 160px to crop → 80px from each side (center)
+3. Vertical: 600 - 480 = 120px to crop
+   - Center crop would be: 60px from top, 60px from bottom
+   - With `crop_y_offset=60`: 120px from top, 0px from bottom
+4. Output: 640x480 with top portion removed (simulates tilting camera down)
 
-1. Camera captures frames at `capture_width` x `capture_height` (1280x960)
-2. Center region of `width` x `height` (640x480) is cropped
-3. Output is 640x480 - same as other cameras, but with narrower field of view (zoom effect)
+### Adjusting the Crop
 
-### Zoom levels
+**To remove more/less from top**, change `crop_y_offset`:
 
-| Capture Resolution | Output | Zoom Factor |
-|-------------------|--------|-------------|
-| 1280x960 | 640x480 | ~2x |
-| 1920x1080 | 640x480 | ~2.25x (with letterboxing) |
-| 1024x768 | 640x480 | ~1.6x |
+| crop_y_offset | Top removed | Bottom removed | Effect |
+|---------------|-------------|----------------|--------|
+| 0 | 60px | 60px | Center crop |
+| 30 | 90px | 30px | Slight tilt down |
+| 60 | 120px | 0px | Maximum tilt down (current) |
+| -30 | 30px | 90px | Tilt up |
+
+**To remove MORE than 120px from top**, you need a larger capture resolution (but this adds horizontal zoom):
+
+| Capture | Vertical crop available | Horizontal crop (zoom) |
+|---------|------------------------|----------------------|
+| 800x600 | 120px | 160px (minimal) |
+| 1024x768 | 288px | 384px (noticeable zoom) |
+| 1280x960 | 480px | 640px (2x zoom) |
+
+### Example Configurations
+
+```python
+# No crop (original behavior)
+"head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"}
+
+# Crop top only, minimal zoom (CURRENT SETUP)
+"head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 800, "capture_height": 600, "crop_y_offset": 60, "fps": 30, "fourcc": "MJPG"}
+
+# 2x zoom with center crop
+"head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 1280, "capture_height": 960, "fps": 30, "fourcc": "MJPG"}
+
+# 2x zoom with top crop
+"head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "capture_width": 1280, "capture_height": 960, "crop_y_offset": 240, "fps": 30, "fourcc": "MJPG"}
+```
 
 ---
 
@@ -370,14 +413,15 @@ cd /home/jrobot/project/lerobot
 python -c "
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 
-# Test digital zoom config
+# Test current config (crop top, minimal zoom)
 config = OpenCVCameraConfig(
     index_or_path=4,
     fps=30,
     width=640,
     height=480,
-    capture_width=1280,
-    capture_height=960,
+    capture_width=800,
+    capture_height=600,
+    crop_y_offset=60,
     fourcc='MJPG'
 )
 camera = OpenCVCamera(config)
@@ -391,11 +435,10 @@ print('SUCCESS!')
 
 ### Full recording test
 ```bash
-python jdocs/bimanual/jassy/scripts/collect_bimanuel_xlerobot_data.py --task right_arm_pick_and_place --num_episodes 1
+python jdocs/bimanual/jassy/scripts/collect_bimanuel_xlerobot_data.py --task bimanual_pick_and_place --num_episodes 1
 ```
 
-Then compare videos:
+Then check videos:
 - Head camera: `datasets_bimanuel/bimanual/<task>/videos/observation.images.head/`
-- Wrist cameras: `datasets_bimanuel/bimanual/<task>/videos/observation.images.left_wrist/`
 
-The head camera should show a more "zoomed in" view (less background, table/arms appear larger).
+The head camera should show less ceiling/background at the top compared to original.
