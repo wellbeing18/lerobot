@@ -107,6 +107,19 @@ LEFT_ARM_DIM = 6
 RIGHT_ARM_DIM = 6
 TOTAL_DIM = LEFT_ARM_DIM + RIGHT_ARM_DIM  # 12
 
+# Safety: Maximum action delta per step (degrees) to prevent dangerous movements
+MAX_ACTION_DELTA = 5.0  # Maximum degrees change per action step
+
+# Expected starting positions from training data analysis
+# Format: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]
+# LEFT ARM TASK: Left arm starts folded, right arm in resting position
+LEFT_TASK_START_LEFT_ARM = np.array([0.0, -98.0, 99.5, 51.0, 0.0, 0.5])
+LEFT_TASK_START_RIGHT_ARM = np.array([-2.0, -99.0, 99.3, 52.0, 3.3, 0.5])
+
+# RIGHT ARM TASK: Right arm starts folded, left arm in resting position
+RIGHT_TASK_START_LEFT_ARM = np.array([-2.0, -99.0, 99.3, 52.0, 3.3, 0.5])
+RIGHT_TASK_START_RIGHT_ARM = np.array([0.0, -98.0, 99.5, 51.0, 0.0, 0.5])
+
 # ============================================================================
 
 # Add project src to path
@@ -283,10 +296,22 @@ class BimanualRobotController:
         self.left_use_degrees = left_config.get("use_degrees", True)
         self.right_use_degrees = right_config.get("use_degrees", True)
 
-        # Calibration IDs (to reuse existing calibration files)
+        # Calibration IDs (required to load calibration files)
         # IDs are nested under left_arm.id and right_arm.id in the config
-        self.left_arm_id = left_config.get("id", None)
-        self.right_arm_id = right_config.get("id", None)
+        self.left_arm_id = left_config.get("id")
+        self.right_arm_id = right_config.get("id")
+
+        # Validate required config - fail fast instead of silent None
+        if not self.left_arm_id:
+            raise ValueError(
+                f"Missing 'id' in robot.left_arm config. "
+                f"Expected 'robot.left_arm.id' in hardware config, got: {left_config}"
+            )
+        if not self.right_arm_id:
+            raise ValueError(
+                f"Missing 'id' in robot.right_arm config. "
+                f"Expected 'robot.right_arm.id' in hardware config, got: {right_config}"
+            )
 
         # Motor names for bimanual (order matters for action vector)
         self.motor_names = [
@@ -359,6 +384,62 @@ class BimanualRobotController:
         """Disconnect from robot."""
         if self.robot is not None:
             self.robot.disconnect()
+
+
+def move_to_start_position(
+    robot: BimanualRobotController,
+    target_position: np.ndarray,
+    duration: float = 3.0,
+    rate: float = 30.0,
+):
+    """Smoothly move robot to target starting position.
+
+    Args:
+        robot: BimanualRobotController instance
+        target_position: 12D array of target joint positions
+        duration: Time to reach target (seconds)
+        rate: Control rate (Hz)
+    """
+    logger.info(f"\nMoving to starting position over {duration}s...")
+    logger.info(f"  Target left arm:  [{', '.join([f'{v:.1f}' for v in target_position[:6]])}]")
+    logger.info(f"  Target right arm: [{', '.join([f'{v:.1f}' for v in target_position[6:]])}]")
+
+    current = robot.get_state()
+    logger.info(f"  Current left arm:  [{', '.join([f'{v:.1f}' for v in current[:6]])}]")
+    logger.info(f"  Current right arm: [{', '.join([f'{v:.1f}' for v in current[6:]])}]")
+
+    num_steps = int(duration * rate)
+    interval = 1.0 / rate
+
+    for step in range(num_steps + 1):
+        alpha = step / num_steps  # Linear interpolation factor
+        interpolated = current + alpha * (target_position - current)
+        robot.send_action(interpolated)
+        time.sleep(interval)
+
+        if step % int(rate) == 0:  # Log every second
+            logger.info(f"  Move progress: {step}/{num_steps} ({alpha*100:.0f}%)")
+
+    final_state = robot.get_state()
+    logger.info(f"  Final left arm:  [{', '.join([f'{v:.1f}' for v in final_state[:6]])}]")
+    logger.info(f"  Final right arm: [{', '.join([f'{v:.1f}' for v in final_state[6:]])}]")
+    logger.info("  Move complete!")
+
+
+def clip_action_delta(action: np.ndarray, current_state: np.ndarray, max_delta: float = MAX_ACTION_DELTA) -> np.ndarray:
+    """Clip action to prevent dangerous large movements.
+
+    Args:
+        action: Target action (12D)
+        current_state: Current robot state (12D)
+        max_delta: Maximum allowed change per joint (degrees)
+
+    Returns:
+        Clipped action that limits movement to max_delta per joint
+    """
+    delta = action - current_state
+    clipped_delta = np.clip(delta, -max_delta, max_delta)
+    return current_state + clipped_delta
 
 
 def log_diagnostic_info(
@@ -507,6 +588,10 @@ def run_inference_loop(
     record_images: bool = False,
     device: str = "cuda",
     dataset_stats: dict = None,
+    freeze_left: bool = False,
+    freeze_right: bool = False,
+    clip_actions: bool = False,
+    max_delta: float = MAX_ACTION_DELTA,
 ):
     """Main bimanual inference loop."""
     global running
@@ -516,6 +601,12 @@ def run_inference_loop(
     logger.info(f"Domain ID: {domain_id}")
     logger.info(f"Action dim: {TOTAL_DIM} (6 per arm)")
     logger.info(f"Action interval: {action_interval*1000:.1f}ms ({1/action_interval:.1f}Hz)")
+    if freeze_left:
+        logger.info(">>> LEFT ARM FROZEN - holding current position <<<")
+    if freeze_right:
+        logger.info(">>> RIGHT ARM FROZEN - holding current position <<<")
+    if clip_actions:
+        logger.info(f">>> ACTION CLIPPING ENABLED - max delta: {max_delta}° per step <<<")
     logger.info("Press Ctrl+C to stop\n")
 
     start_time = time.time()
@@ -608,6 +699,16 @@ def run_inference_loop(
                 img_path = record_dir / f"step_{step_count:04d}_{name}.jpg"
                 cv2.imwrite(str(img_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
+        # Apply action clipping for safety (before freeze, so we clip model output)
+        if clip_actions:
+            action = clip_action_delta(action, state, max_delta)
+
+        # Apply arm freezing - replace model action with current state to hold position
+        if freeze_left:
+            action[:LEFT_ARM_DIM] = state[:LEFT_ARM_DIM]
+        if freeze_right:
+            action[LEFT_ARM_DIM:] = state[LEFT_ARM_DIM:]
+
         robot.send_action(action)
         step_count += 1
 
@@ -688,6 +789,38 @@ def main():
         "--right",
         action="store_true",
         help="Use right arm task"
+    )
+    parser.add_argument(
+        "--freeze-left",
+        action="store_true",
+        help="Freeze left arm (hold current position, don't send model actions)"
+    )
+    parser.add_argument(
+        "--freeze-right",
+        action="store_true",
+        help="Freeze right arm (hold current position, don't send model actions)"
+    )
+    parser.add_argument(
+        "--init-position",
+        action="store_true",
+        help="Move robot to training starting position before inference (RECOMMENDED)"
+    )
+    parser.add_argument(
+        "--init-duration",
+        type=float,
+        default=3.0,
+        help="Duration (seconds) to move to starting position (default: 3.0)"
+    )
+    parser.add_argument(
+        "--clip-actions",
+        action="store_true",
+        help="Clip action deltas to prevent dangerous large movements"
+    )
+    parser.add_argument(
+        "--max-delta",
+        type=float,
+        default=MAX_ACTION_DELTA,
+        help=f"Maximum action delta per step in degrees (default: {MAX_ACTION_DELTA})"
     )
     parser.add_argument(
         "--domain-id",
@@ -832,6 +965,22 @@ def main():
             logger.info("  DRY RUN mode - actions will not be sent to robot")
             robot.robot = None
 
+        # Move to training starting position if requested
+        if args.init_position and not args.dry_run:
+            # Determine target position based on task
+            if args.right:
+                target_left = RIGHT_TASK_START_LEFT_ARM
+                target_right = RIGHT_TASK_START_RIGHT_ARM
+            else:
+                target_left = LEFT_TASK_START_LEFT_ARM
+                target_right = LEFT_TASK_START_RIGHT_ARM
+
+            target_position = np.concatenate([target_left, target_right])
+            move_to_start_position(robot, target_position, duration=args.init_duration)
+
+            # Brief pause to let robot settle
+            time.sleep(0.5)
+
         run_inference_loop(
             policy=policy,
             preprocessor=preprocessor,
@@ -845,6 +994,10 @@ def main():
             record_images=args.record,
             device=args.device,
             dataset_stats=dataset_metadata.stats,
+            freeze_left=args.freeze_left,
+            freeze_right=args.freeze_right,
+            clip_actions=args.clip_actions,
+            max_delta=args.max_delta,
         )
 
     except KeyboardInterrupt:

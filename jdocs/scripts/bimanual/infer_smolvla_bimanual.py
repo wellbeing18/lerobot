@@ -287,10 +287,22 @@ class BimanualRobotController:
         self.left_use_degrees = left_config.get("use_degrees", True)
         self.right_use_degrees = right_config.get("use_degrees", True)
 
-        # Calibration IDs (to reuse existing calibration files)
+        # Calibration IDs (required to load calibration files)
         # IDs are nested under left_arm.id and right_arm.id in the config
-        self.left_arm_id = left_config.get("id", None)
-        self.right_arm_id = right_config.get("id", None)
+        self.left_arm_id = left_config.get("id")
+        self.right_arm_id = right_config.get("id")
+
+        # Validate required config - fail fast instead of silent None
+        if not self.left_arm_id:
+            raise ValueError(
+                f"Missing 'id' in robot.left_arm config. "
+                f"Expected 'robot.left_arm.id' in hardware config, got: {left_config}"
+            )
+        if not self.right_arm_id:
+            raise ValueError(
+                f"Missing 'id' in robot.right_arm config. "
+                f"Expected 'robot.right_arm.id' in hardware config, got: {right_config}"
+            )
 
         # Motor names for bimanual (order matters for action vector)
         self.motor_names = [
