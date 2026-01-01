@@ -44,7 +44,27 @@ See `pyproject.toml` for all CLI scripts, `Makefile` for test commands.
 - Never include "Claude Code" or AI attribution in commit messages
 
 ### Coding Rules
-- Always throw errors when key logic is not satisfied; never default to arbitrary values
+
+#### Fail Fast - Never Silently Default Required Values
+- **Always throw errors** when key logic is not satisfied; never default to arbitrary values
+- **Never use `.get(key, None)` or `.get(key, default)` for required config values** - this hides bugs
+- For required values, use explicit validation with clear error messages:
+
+```python
+# BAD - Silent failure, bug hidden until much later
+self.left_arm_id = config.get("left_arm_id", None)
+
+# GOOD - Fail fast with clear error message
+self.left_arm_id = config.get("left_arm_id")
+if not self.left_arm_id:
+    raise ValueError(
+        f"Missing required 'left_arm_id' in config. Got: {config}"
+    )
+```
+
+- When loading config/YAML, validate structure matches expectations immediately
+- Include the actual config values in error messages to help debugging
+- Prefer early exceptions over irresponsible defaults which could silently cause some mysteriously unexpected behavior
 
 ### Investigation & Research Methodology
 
