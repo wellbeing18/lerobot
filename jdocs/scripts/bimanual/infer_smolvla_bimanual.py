@@ -74,8 +74,11 @@ DEFAULT_TASK = DEFAULT_TASK_LEFT  # Default to left arm task
 # Inference Settings
 ACTION_INTERVAL = 0.033   # 30Hz execution rate (1/30 seconds)
 
-# Hardware Config (external file)
-HARDWARE_CONFIG = "jdocs/scripts/bimanual/bimanual_so101_hardware.yaml"
+# Hardware Config - Use CENTRAL config as single source of truth
+# All scripts should read from this path to avoid port mismatch issues
+HARDWARE_CONFIG_CENTRAL = "jdocs/configs/hardware/xlerobot_bimanual.yaml"
+# Legacy path (for backwards compatibility)
+HARDWARE_CONFIG_LEGACY = "jdocs/scripts/bimanual/bimanual_so101_hardware.yaml"
 
 # Dataset (for loading stats) - relative to PROJECT_ROOT
 DATASET_PATH = None  # Will be set after PROJECT_ROOT is defined
@@ -90,6 +93,23 @@ MAX_DURATION = 60.0       # Maximum run duration in seconds
 LEFT_ARM_DIM = 6
 RIGHT_ARM_DIM = 6
 TOTAL_DIM = LEFT_ARM_DIM + RIGHT_ARM_DIM  # 12
+
+# Expected starting positions from training data analysis
+# Format: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]
+# LEFT ARM TASK: Left arm starts folded, right arm in resting position
+LEFT_TASK_START_LEFT_ARM = np.array([0.0, -98.0, 99.5, 51.0, 0.0, 0.5])
+LEFT_TASK_START_RIGHT_ARM = np.array([-2.0, -99.0, 99.3, 52.0, 3.3, 0.5])
+
+# RIGHT ARM TASK: Right arm starts folded, left arm in resting position
+RIGHT_TASK_START_LEFT_ARM = np.array([-2.0, -99.0, 99.3, 52.0, 3.3, 0.5])
+RIGHT_TASK_START_RIGHT_ARM = np.array([0.0, -98.0, 99.5, 51.0, 0.0, 0.5])
+
+# Safety: Maximum action delta per step (degrees) to prevent dangerous movements
+MAX_ACTION_DELTA = 5.0  # Maximum degrees change per action step
+
+# Diagnostic Settings
+DIAGNOSTIC_MODE = True    # Enable detailed pipeline logging
+SAFETY_MAX_DELTA = 30.0   # Threshold for warning about large deltas
 
 # ============================================================================
 
@@ -142,16 +162,42 @@ def signal_handler(sig, frame):
     running = False
 
 
-def load_hardware_config(config_path: str) -> dict:
-    """Load hardware configuration from YAML file."""
-    full_path = PROJECT_ROOT / config_path
-    if not full_path.exists():
-        raise FileNotFoundError(f"Hardware config not found: {full_path}")
+def load_hardware_config(config_path: str = None) -> dict:
+    """Load hardware configuration from YAML file.
+
+    Priority:
+    1. Explicit config_path argument
+    2. Central config (jdocs/configs/hardware/xlerobot_bimanual.yaml)
+    3. Legacy config (jdocs/scripts/bimanual/bimanual_so101_hardware.yaml)
+
+    This ensures all scripts use the same hardware settings.
+    """
+    # Try paths in priority order
+    paths_to_try = []
+    if config_path:
+        paths_to_try.append(PROJECT_ROOT / config_path)
+    paths_to_try.append(PROJECT_ROOT / HARDWARE_CONFIG_CENTRAL)
+    paths_to_try.append(PROJECT_ROOT / HARDWARE_CONFIG_LEGACY)
+
+    full_path = None
+    for path in paths_to_try:
+        if path.exists():
+            full_path = path
+            break
+
+    if full_path is None:
+        raise FileNotFoundError(
+            f"Hardware config not found. Tried:\n"
+            f"  - {paths_to_try[0] if config_path else 'N/A'}\n"
+            f"  - {PROJECT_ROOT / HARDWARE_CONFIG_CENTRAL}\n"
+            f"  - {PROJECT_ROOT / HARDWARE_CONFIG_LEGACY}\n"
+            f"Run 'python jdocs/scripts/hardware/scan_hardware.py' to create config."
+        )
 
     with open(full_path) as f:
         config = yaml.safe_load(f)
 
-    logger.info(f"Loaded hardware config from: {config_path}")
+    logger.info(f"Loaded hardware config from: {full_path}")
     return config
 
 
@@ -241,6 +287,11 @@ class BimanualRobotController:
         self.left_use_degrees = left_config.get("use_degrees", True)
         self.right_use_degrees = right_config.get("use_degrees", True)
 
+        # Calibration IDs (to reuse existing calibration files)
+        # IDs are nested under left_arm.id and right_arm.id in the config
+        self.left_arm_id = left_config.get("id", None)
+        self.right_arm_id = right_config.get("id", None)
+
         # Motor names for bimanual (order matters for action vector)
         self.motor_names = [
             # Left arm (indices 0-5)
@@ -263,12 +314,14 @@ class BimanualRobotController:
                 id=self.robot_id,
                 left_arm_port=self.left_port,
                 right_arm_port=self.right_port,
+                left_arm_id=self.left_arm_id,
+                right_arm_id=self.right_arm_id,
                 left_arm_use_degrees=self.left_use_degrees,
                 right_arm_use_degrees=self.right_use_degrees,
             )
 
             self.robot = BiSO101Follower(robot_config)
-            self.robot.connect()
+            self.robot.connect(calibrate=False)  # Use existing calibration files
 
             logger.info(f"  Bimanual robot connected:")
             logger.info(f"    Left arm: {self.left_port}")
@@ -307,6 +360,154 @@ class BimanualRobotController:
         """Disconnect from robot."""
         if self.robot is not None:
             self.robot.disconnect()
+
+
+def move_to_start_position(
+    robot: BimanualRobotController,
+    target_position: np.ndarray,
+    duration: float = 3.0,
+    rate: float = 30.0,
+):
+    """Smoothly move robot to target starting position.
+
+    Args:
+        robot: BimanualRobotController instance
+        target_position: 12D array of target joint positions
+        duration: Time to reach target (seconds)
+        rate: Control rate (Hz)
+    """
+    logger.info(f"\nMoving to starting position over {duration}s...")
+    logger.info(f"  Target left arm:  [{', '.join([f'{v:.1f}' for v in target_position[:6]])}]")
+    logger.info(f"  Target right arm: [{', '.join([f'{v:.1f}' for v in target_position[6:]])}]")
+
+    current = robot.get_state()
+    logger.info(f"  Current left arm:  [{', '.join([f'{v:.1f}' for v in current[:6]])}]")
+    logger.info(f"  Current right arm: [{', '.join([f'{v:.1f}' for v in current[6:]])}]")
+
+    num_steps = int(duration * rate)
+    interval = 1.0 / rate
+
+    for step in range(num_steps + 1):
+        alpha = step / num_steps  # Linear interpolation factor
+        interpolated = current + alpha * (target_position - current)
+        robot.send_action(interpolated)
+        time.sleep(interval)
+
+        if step % int(rate) == 0:  # Log every second
+            logger.info(f"  Move progress: {step}/{num_steps} ({alpha*100:.0f}%)")
+
+    final_state = robot.get_state()
+    logger.info(f"  Final left arm:  [{', '.join([f'{v:.1f}' for v in final_state[:6]])}]")
+    logger.info(f"  Final right arm: [{', '.join([f'{v:.1f}' for v in final_state[6:]])}]")
+    logger.info("  Move complete!")
+
+
+def clip_action_delta(action: np.ndarray, current_state: np.ndarray, max_delta: float = MAX_ACTION_DELTA) -> np.ndarray:
+    """Clip action to prevent dangerous large movements.
+
+    Args:
+        action: Target action (12D)
+        current_state: Current robot state (12D)
+        max_delta: Maximum allowed change per joint (degrees)
+
+    Returns:
+        Clipped action that limits movement to max_delta per joint
+    """
+    delta = action - current_state
+    clipped_delta = np.clip(delta, -max_delta, max_delta)
+    return current_state + clipped_delta
+
+
+def log_diagnostic_info(
+    step: int,
+    state: np.ndarray,
+    action: np.ndarray,
+    dataset_stats: dict,
+    preprocessor_output: dict = None,
+    raw_policy_action: np.ndarray = None,
+):
+    """Log detailed diagnostic information for debugging inference issues."""
+    if not DIAGNOSTIC_MODE:
+        return
+
+    state_stats = dataset_stats.get("observation.state", {})
+    action_stats = dataset_stats.get("action", {})
+
+    # Only log detailed diagnostics on first step
+    if step == 0:
+        logger.info("\n" + "=" * 70)
+        logger.info("DIAGNOSTIC: FIRST STEP DETAILED ANALYSIS")
+        logger.info("=" * 70)
+
+        # Compare current state with training data
+        logger.info("\n[State vs Training Data]")
+        logger.info(f"{'Joint':<20} {'Current':>10} {'TrainMean':>10} {'TrainMin':>10} {'TrainMax':>10} {'Status':<15}")
+        logger.info("-" * 75)
+
+        state_mean = state_stats.get("mean", [0] * 12)
+        state_min = state_stats.get("min", [-180] * 12)
+        state_max = state_stats.get("max", [180] * 12)
+
+        joint_names = ["L_pan", "L_lift", "L_elbow", "L_wflex", "L_wroll", "L_grip",
+                       "R_pan", "R_lift", "R_elbow", "R_wflex", "R_wroll", "R_grip"]
+
+        for i, name in enumerate(joint_names):
+            curr = state[i]
+            mean = state_mean[i]
+            min_v = state_min[i]
+            max_v = state_max[i]
+
+            in_range = min_v <= curr <= max_v
+            diff_from_mean = curr - mean
+            status = "OK" if in_range else "OUT OF RANGE!"
+            if abs(diff_from_mean) > 30:
+                status = f"DIFF={diff_from_mean:+.0f}°"
+
+            logger.info(f"{name:<20} {curr:>10.1f} {mean:>10.1f} {min_v:>10.1f} {max_v:>10.1f} {status:<15}")
+
+        # Show action output
+        logger.info("\n[Action Output vs Training Action Stats]")
+        logger.info(f"{'Joint':<20} {'Action':>10} {'ActMean':>10} {'ActMin':>10} {'ActMax':>10} {'Delta':>10}")
+        logger.info("-" * 70)
+
+        action_mean = action_stats.get("mean", [0] * 12)
+        action_min = action_stats.get("min", [-180] * 12)
+        action_max = action_stats.get("max", [180] * 12)
+
+        for i, name in enumerate(joint_names):
+            act = action[i]
+            mean = action_mean[i]
+            min_v = action_min[i]
+            max_v = action_max[i]
+            delta = act - state[i]
+
+            logger.info(f"{name:<20} {act:>10.1f} {mean:>10.1f} {min_v:>10.1f} {max_v:>10.1f} {delta:>+10.1f}")
+
+        # Show normalized state if available
+        if preprocessor_output is not None:
+            obs_state = preprocessor_output.get("observation.state")
+            if obs_state is not None:
+                if isinstance(obs_state, torch.Tensor):
+                    norm_state = obs_state.squeeze().cpu().numpy()
+                    logger.info("\n[Normalized State (what policy sees)]")
+                    logger.info(f"  Left arm:  [{', '.join([f'{v:+.3f}' for v in norm_state[:6]])}]")
+                    logger.info(f"  Right arm: [{', '.join([f'{v:+.3f}' for v in norm_state[6:12]])}]")
+
+        if raw_policy_action is not None:
+            logger.info("\n[Raw Policy Output (before postprocessor)]")
+            logger.info(f"  Left arm:  [{', '.join([f'{v:+.3f}' for v in raw_policy_action[:6]])}]")
+            logger.info(f"  Right arm: [{', '.join([f'{v:+.3f}' for v in raw_policy_action[6:12]])}]")
+
+        logger.info("\n" + "=" * 70)
+
+    # Safety check: large action deltas
+    action_delta = action - state
+    max_delta = np.max(np.abs(action_delta))
+    if max_delta > SAFETY_MAX_DELTA:
+        logger.warning(f"Step {step}: LARGE ACTION DELTA detected! Max delta: {max_delta:.1f}°")
+        logger.warning(f"  State:  [{', '.join([f'{v:.1f}' for v in state])}]")
+        logger.warning(f"  Action: [{', '.join([f'{v:.1f}' for v in action])}]")
+        logger.warning(f"  Delta:  [{', '.join([f'{v:+.1f}' for v in action_delta])}]")
 
 
 def format_observation(
@@ -359,6 +560,11 @@ def run_inference_loop(
     action_interval: float = 0.033,
     record_images: bool = False,
     device: str = "cuda",
+    freeze_left: bool = False,
+    freeze_right: bool = False,
+    clip_actions: bool = False,
+    max_delta: float = MAX_ACTION_DELTA,
+    dataset_stats: dict = None,
 ):
     """Main bimanual inference loop."""
     global running
@@ -367,6 +573,12 @@ def run_inference_loop(
     logger.info(f"Task: {task}")
     logger.info(f"Action dim: {TOTAL_DIM} (6 per arm, flat vector)")
     logger.info(f"Action interval: {action_interval*1000:.1f}ms ({1/action_interval:.1f}Hz)")
+    if freeze_left:
+        logger.info(">>> LEFT ARM FROZEN - holding current position <<<")
+    if freeze_right:
+        logger.info(">>> RIGHT ARM FROZEN - holding current position <<<")
+    if clip_actions:
+        logger.info(f">>> ACTION CLIPPING ENABLED - max delta: {max_delta}° per step <<<")
     logger.info("")
     logger.info("WARNING: SmolVLA has NO native bimanual support!")
     logger.info("         Actions are treated as flat 12D vector.")
@@ -396,15 +608,25 @@ def run_inference_loop(
         state_history.append(state.copy())
 
         observation = format_observation(images, state, task, device)
-        observation = preprocessor(observation)
+        preprocessed_obs = preprocessor(observation)
 
         inf_start = time.time()
         with torch.inference_mode():
-            action = policy.select_action(observation)
+            raw_action = policy.select_action(preprocessed_obs)
         inf_time = time.time() - inf_start
         inference_times.append(inf_time)
 
-        action = postprocessor(action)
+        # Capture raw policy output for diagnostics
+        raw_policy_action = None
+        if DIAGNOSTIC_MODE and step_count == 0:
+            if isinstance(raw_action, torch.Tensor):
+                raw_policy_action = raw_action.squeeze(0).cpu().numpy()
+            elif isinstance(raw_action, dict) and "action" in raw_action:
+                act = raw_action["action"]
+                if isinstance(act, torch.Tensor):
+                    raw_policy_action = act.squeeze(0).cpu().numpy()
+
+        action = postprocessor(raw_action)
 
         if isinstance(action, torch.Tensor):
             action = action.squeeze(0).cpu().numpy()
@@ -419,6 +641,17 @@ def run_inference_loop(
             action = action[:TOTAL_DIM]
 
         action_history.append(action.copy())
+
+        # Run diagnostics
+        if dataset_stats:
+            log_diagnostic_info(
+                step=step_count,
+                state=state,
+                action=action,
+                dataset_stats=dataset_stats,
+                preprocessor_output=preprocessed_obs,
+                raw_policy_action=raw_policy_action,
+            )
 
         # Log detailed info every 30 steps (~1 second at 30Hz)
         if step_count % 30 == 0:
@@ -440,6 +673,16 @@ def run_inference_loop(
             for name, frame in images.items():
                 img_path = record_dir / f"step_{step_count:04d}_{name}.jpg"
                 cv2.imwrite(str(img_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+        # Apply action clipping for safety (before freeze, so we clip model output)
+        if clip_actions:
+            action = clip_action_delta(action, state, max_delta)
+
+        # Apply arm freezing - replace model action with current state to hold position
+        if freeze_left:
+            action[:LEFT_ARM_DIM] = state[:LEFT_ARM_DIM]
+        if freeze_right:
+            action[LEFT_ARM_DIM:] = state[LEFT_ARM_DIM:]
 
         robot.send_action(action)
         step_count += 1
@@ -523,6 +766,38 @@ def main():
         help="Use right arm task"
     )
     parser.add_argument(
+        "--freeze-left",
+        action="store_true",
+        help="Freeze left arm (hold current position, don't send model actions)"
+    )
+    parser.add_argument(
+        "--freeze-right",
+        action="store_true",
+        help="Freeze right arm (hold current position, don't send model actions)"
+    )
+    parser.add_argument(
+        "--init-position",
+        action="store_true",
+        help="Move robot to training starting position before inference (RECOMMENDED)"
+    )
+    parser.add_argument(
+        "--init-duration",
+        type=float,
+        default=3.0,
+        help="Duration (seconds) to move to starting position (default: 3.0)"
+    )
+    parser.add_argument(
+        "--clip-actions",
+        action="store_true",
+        help="Clip action deltas to prevent dangerous large movements"
+    )
+    parser.add_argument(
+        "--max-delta",
+        type=float,
+        default=MAX_ACTION_DELTA,
+        help=f"Maximum action delta per step in degrees (default: {MAX_ACTION_DELTA})"
+    )
+    parser.add_argument(
         "--duration",
         type=float,
         default=MAX_DURATION,
@@ -541,8 +816,8 @@ def main():
     parser.add_argument(
         "--hw-config",
         type=str,
-        default=HARDWARE_CONFIG,
-        help=f"Hardware config path (default: {HARDWARE_CONFIG})"
+        default=None,  # None means use central config (see load_hardware_config)
+        help=f"Hardware config path (default: central config at {HARDWARE_CONFIG_CENTRAL})"
     )
     parser.add_argument(
         "--dataset",
@@ -556,7 +831,25 @@ def main():
         default=DEVICE,
         help=f"Device for inference (default: {DEVICE})"
     )
+    parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        default=True,
+        help="Enable detailed diagnostic logging (default: True)"
+    )
+    parser.add_argument(
+        "--no-diagnostic",
+        action="store_true",
+        help="Disable diagnostic logging"
+    )
     args = parser.parse_args()
+
+    # Set diagnostic mode
+    global DIAGNOSTIC_MODE
+    if args.no_diagnostic:
+        DIAGNOSTIC_MODE = False
+    else:
+        DIAGNOSTIC_MODE = args.diagnostic
 
     # Determine task based on flags
     if args.task:
@@ -644,6 +937,22 @@ def main():
             logger.info("  DRY RUN mode - actions will not be sent to robot")
             robot.robot = None
 
+        # Move to training starting position if requested
+        if args.init_position and not args.dry_run:
+            # Determine target position based on task
+            if args.right:
+                target_left = RIGHT_TASK_START_LEFT_ARM
+                target_right = RIGHT_TASK_START_RIGHT_ARM
+            else:
+                target_left = LEFT_TASK_START_LEFT_ARM
+                target_right = LEFT_TASK_START_RIGHT_ARM
+
+            target_position = np.concatenate([target_left, target_right])
+            move_to_start_position(robot, target_position, duration=args.init_duration)
+
+            # Brief pause to let robot settle
+            time.sleep(0.5)
+
         run_inference_loop(
             policy=policy,
             preprocessor=preprocessor,
@@ -655,6 +964,11 @@ def main():
             action_interval=ACTION_INTERVAL,
             record_images=args.record,
             device=args.device,
+            freeze_left=args.freeze_left,
+            freeze_right=args.freeze_right,
+            clip_actions=args.clip_actions,
+            max_delta=args.max_delta,
+            dataset_stats=dataset_metadata.stats,
         )
 
     except KeyboardInterrupt:

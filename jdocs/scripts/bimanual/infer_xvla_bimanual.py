@@ -83,8 +83,15 @@ DEFAULT_DOMAIN_ID = 21
 # Inference Settings
 ACTION_INTERVAL = 0.033   # 30Hz execution rate (1/30 seconds)
 
-# Hardware Config (external file)
-HARDWARE_CONFIG = "jdocs/scripts/bimanual/bimanual_so101_hardware.yaml"
+# Diagnostic Settings
+DIAGNOSTIC_MODE = True    # Enable detailed pipeline logging
+SAFETY_MAX_DELTA = 30.0   # Maximum degrees change per step (safety limit)
+
+# Hardware Config - Use CENTRAL config as single source of truth
+# All scripts should read from this path to avoid port mismatch issues
+HARDWARE_CONFIG_CENTRAL = "jdocs/configs/hardware/xlerobot_bimanual.yaml"
+# Legacy path (for backwards compatibility)
+HARDWARE_CONFIG_LEGACY = "jdocs/scripts/bimanual/bimanual_so101_hardware.yaml"
 
 # Dataset (for loading stats) - relative to PROJECT_ROOT
 DATASET_PATH = None  # Will be set after PROJECT_ROOT is defined
@@ -151,16 +158,42 @@ def signal_handler(sig, frame):
     running = False
 
 
-def load_hardware_config(config_path: str) -> dict:
-    """Load hardware configuration from YAML file."""
-    full_path = PROJECT_ROOT / config_path
-    if not full_path.exists():
-        raise FileNotFoundError(f"Hardware config not found: {full_path}")
+def load_hardware_config(config_path: str = None) -> dict:
+    """Load hardware configuration from YAML file.
+
+    Priority:
+    1. Explicit config_path argument
+    2. Central config (jdocs/configs/hardware/xlerobot_bimanual.yaml)
+    3. Legacy config (jdocs/scripts/bimanual/bimanual_so101_hardware.yaml)
+
+    This ensures all scripts use the same hardware settings.
+    """
+    # Try paths in priority order
+    paths_to_try = []
+    if config_path:
+        paths_to_try.append(PROJECT_ROOT / config_path)
+    paths_to_try.append(PROJECT_ROOT / HARDWARE_CONFIG_CENTRAL)
+    paths_to_try.append(PROJECT_ROOT / HARDWARE_CONFIG_LEGACY)
+
+    full_path = None
+    for path in paths_to_try:
+        if path.exists():
+            full_path = path
+            break
+
+    if full_path is None:
+        raise FileNotFoundError(
+            f"Hardware config not found. Tried:\n"
+            f"  - {paths_to_try[0] if config_path else 'N/A'}\n"
+            f"  - {PROJECT_ROOT / HARDWARE_CONFIG_CENTRAL}\n"
+            f"  - {PROJECT_ROOT / HARDWARE_CONFIG_LEGACY}\n"
+            f"Run 'python jdocs/scripts/hardware/scan_hardware.py' to create config."
+        )
 
     with open(full_path) as f:
         config = yaml.safe_load(f)
 
-    logger.info(f"Loaded hardware config from: {config_path}")
+    logger.info(f"Loaded hardware config from: {full_path}")
     return config
 
 
@@ -250,6 +283,11 @@ class BimanualRobotController:
         self.left_use_degrees = left_config.get("use_degrees", True)
         self.right_use_degrees = right_config.get("use_degrees", True)
 
+        # Calibration IDs (to reuse existing calibration files)
+        # IDs are nested under left_arm.id and right_arm.id in the config
+        self.left_arm_id = left_config.get("id", None)
+        self.right_arm_id = right_config.get("id", None)
+
         # Motor names for bimanual (order matters for action vector)
         self.motor_names = [
             # Left arm (indices 0-5)
@@ -272,12 +310,14 @@ class BimanualRobotController:
                 id=self.robot_id,
                 left_arm_port=self.left_port,
                 right_arm_port=self.right_port,
+                left_arm_id=self.left_arm_id,
+                right_arm_id=self.right_arm_id,
                 left_arm_use_degrees=self.left_use_degrees,
                 right_arm_use_degrees=self.right_use_degrees,
             )
 
             self.robot = BiSO101Follower(robot_config)
-            self.robot.connect()
+            self.robot.connect(calibrate=False)  # Use existing calibration files
 
             logger.info(f"  Bimanual robot connected:")
             logger.info(f"    Left arm: {self.left_port}")
@@ -319,6 +359,98 @@ class BimanualRobotController:
         """Disconnect from robot."""
         if self.robot is not None:
             self.robot.disconnect()
+
+
+def log_diagnostic_info(
+    step: int,
+    state: np.ndarray,
+    action: np.ndarray,
+    dataset_stats: dict,
+    preprocessor_output: dict = None,
+    raw_policy_action: np.ndarray = None,
+):
+    """Log detailed diagnostic information for debugging inference issues."""
+    if not DIAGNOSTIC_MODE:
+        return
+
+    state_stats = dataset_stats.get("observation.state", {})
+    action_stats = dataset_stats.get("action", {})
+
+    # Only log detailed diagnostics on first step
+    if step == 0:
+        logger.info("\n" + "=" * 70)
+        logger.info("DIAGNOSTIC: FIRST STEP DETAILED ANALYSIS")
+        logger.info("=" * 70)
+
+        # Compare current state with training data
+        logger.info("\n[State vs Training Data]")
+        logger.info(f"{'Joint':<20} {'Current':>10} {'TrainMean':>10} {'TrainMin':>10} {'TrainMax':>10} {'Status':<15}")
+        logger.info("-" * 75)
+
+        state_mean = state_stats.get("mean", [0] * 12)
+        state_min = state_stats.get("min", [-180] * 12)
+        state_max = state_stats.get("max", [180] * 12)
+
+        joint_names = ["L_pan", "L_lift", "L_elbow", "L_wflex", "L_wroll", "L_grip",
+                       "R_pan", "R_lift", "R_elbow", "R_wflex", "R_wroll", "R_grip"]
+
+        for i, name in enumerate(joint_names):
+            curr = state[i]
+            mean = state_mean[i]
+            min_v = state_min[i]
+            max_v = state_max[i]
+
+            in_range = min_v <= curr <= max_v
+            diff_from_mean = curr - mean
+            status = "OK" if in_range else "OUT OF RANGE!"
+            if abs(diff_from_mean) > 30:
+                status = f"DIFF={diff_from_mean:+.0f}°"
+
+            logger.info(f"{name:<20} {curr:>10.1f} {mean:>10.1f} {min_v:>10.1f} {max_v:>10.1f} {status:<15}")
+
+        # Show action output
+        logger.info("\n[Action Output vs Training Action Stats]")
+        logger.info(f"{'Joint':<20} {'Action':>10} {'ActMean':>10} {'ActMin':>10} {'ActMax':>10} {'Delta':>10}")
+        logger.info("-" * 70)
+
+        action_mean = action_stats.get("mean", [0] * 12)
+        action_min = action_stats.get("min", [-180] * 12)
+        action_max = action_stats.get("max", [180] * 12)
+
+        for i, name in enumerate(joint_names):
+            act = action[i]
+            mean = action_mean[i]
+            min_v = action_min[i]
+            max_v = action_max[i]
+            delta = act - state[i]
+
+            logger.info(f"{name:<20} {act:>10.1f} {mean:>10.1f} {min_v:>10.1f} {max_v:>10.1f} {delta:>+10.1f}")
+
+        # Show normalized state if available
+        if preprocessor_output is not None:
+            obs_state = preprocessor_output.get("observation.state")
+            if obs_state is not None:
+                if isinstance(obs_state, torch.Tensor):
+                    norm_state = obs_state.squeeze().cpu().numpy()
+                    logger.info("\n[Normalized State (what policy sees)]")
+                    logger.info(f"  Left arm:  [{', '.join([f'{v:+.3f}' for v in norm_state[:6]])}]")
+                    logger.info(f"  Right arm: [{', '.join([f'{v:+.3f}' for v in norm_state[6:12]])}]")
+
+        if raw_policy_action is not None:
+            logger.info("\n[Raw Policy Output (before postprocessor)]")
+            logger.info(f"  Left arm:  [{', '.join([f'{v:+.3f}' for v in raw_policy_action[:6]])}]")
+            logger.info(f"  Right arm: [{', '.join([f'{v:+.3f}' for v in raw_policy_action[6:12]])}]")
+
+        logger.info("\n" + "=" * 70)
+
+    # Safety check: large action deltas
+    action_delta = action - state
+    max_delta = np.max(np.abs(action_delta))
+    if max_delta > SAFETY_MAX_DELTA:
+        logger.warning(f"Step {step}: LARGE ACTION DELTA detected! Max delta: {max_delta:.1f}°")
+        logger.warning(f"  State:  [{', '.join([f'{v:.1f}' for v in state])}]")
+        logger.warning(f"  Action: [{', '.join([f'{v:.1f}' for v in action])}]")
+        logger.warning(f"  Delta:  [{', '.join([f'{v:+.1f}' for v in action_delta])}]")
 
 
 def format_observation(
@@ -374,6 +506,7 @@ def run_inference_loop(
     action_interval: float = 0.033,
     record_images: bool = False,
     device: str = "cuda",
+    dataset_stats: dict = None,
 ):
     """Main bimanual inference loop."""
     global running
@@ -410,15 +543,25 @@ def run_inference_loop(
         state_history.append(state.copy())
 
         observation = format_observation(images, state, task, domain_id, device)
-        observation = preprocessor(observation)
+        preprocessed_obs = preprocessor(observation)
 
         inf_start = time.time()
         with torch.inference_mode():
-            action = policy.select_action(observation)
+            raw_action = policy.select_action(preprocessed_obs)
         inf_time = time.time() - inf_start
         inference_times.append(inf_time)
 
-        action = postprocessor(action)
+        # Capture raw policy output for diagnostics
+        raw_policy_action = None
+        if DIAGNOSTIC_MODE and step_count == 0:
+            if isinstance(raw_action, torch.Tensor):
+                raw_policy_action = raw_action.squeeze(0).cpu().numpy()
+            elif isinstance(raw_action, dict) and "action" in raw_action:
+                act = raw_action["action"]
+                if isinstance(act, torch.Tensor):
+                    raw_policy_action = act.squeeze(0).cpu().numpy()
+
+        action = postprocessor(raw_action)
 
         if isinstance(action, torch.Tensor):
             action = action.squeeze(0).cpu().numpy()
@@ -432,6 +575,17 @@ def run_inference_loop(
             action = action[:TOTAL_DIM]
 
         action_history.append(action.copy())
+
+        # Run diagnostics
+        if dataset_stats:
+            log_diagnostic_info(
+                step=step_count,
+                state=state,
+                action=action,
+                dataset_stats=dataset_stats,
+                preprocessor_output=preprocessed_obs,
+                raw_policy_action=raw_policy_action,
+            )
 
         # Log detailed info every 30 steps (~1 second at 30Hz)
         if step_count % 30 == 0:
@@ -560,8 +714,8 @@ def main():
     parser.add_argument(
         "--hw-config",
         type=str,
-        default=HARDWARE_CONFIG,
-        help=f"Hardware config path (default: {HARDWARE_CONFIG})"
+        default=None,  # None means use central config (see load_hardware_config)
+        help=f"Hardware config path (default: central config at {HARDWARE_CONFIG_CENTRAL})"
     )
     parser.add_argument(
         "--dataset",
@@ -575,7 +729,25 @@ def main():
         default=DEVICE,
         help=f"Device for inference (default: {DEVICE})"
     )
+    parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        default=True,
+        help="Enable detailed diagnostic logging (default: True)"
+    )
+    parser.add_argument(
+        "--no-diagnostic",
+        action="store_true",
+        help="Disable diagnostic logging"
+    )
     args = parser.parse_args()
+
+    # Set diagnostic mode
+    global DIAGNOSTIC_MODE
+    if args.no_diagnostic:
+        DIAGNOSTIC_MODE = False
+    else:
+        DIAGNOSTIC_MODE = args.diagnostic
 
     # Determine task based on flags
     if args.task:
@@ -672,6 +844,7 @@ def main():
             action_interval=ACTION_INTERVAL,
             record_images=args.record,
             device=args.device,
+            dataset_stats=dataset_metadata.stats,
         )
 
     except KeyboardInterrupt:

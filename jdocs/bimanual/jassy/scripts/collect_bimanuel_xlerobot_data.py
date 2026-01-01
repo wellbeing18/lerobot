@@ -48,9 +48,14 @@ import yaml
 
 # Base paths
 PROJECT_ROOT = Path("/home/jrobot/project/lerobot/jdocs/bimanual/jassy")
+LEROBOT_ROOT = Path("/home/jrobot/project/lerobot")  # Main lerobot project root
 DATASETS_BASE = Path("/home/jrobot/project/lerobot/datasets_bimanuel")  # Bimanual datasets folder
 DATASETS_BASE_LEGACY = Path("/home/jrobot/project/XLeRobot/datasets")  # Legacy single-arm datasets
 CONFIGS_DIR = PROJECT_ROOT / "configs"
+
+# CENTRAL HARDWARE CONFIG - Single source of truth for all port assignments
+# Run 'python jdocs/scripts/hardware/scan_hardware.py' if ports change after reboot
+CENTRAL_HARDWARE_CONFIG = LEROBOT_ROOT / "jdocs" / "configs" / "hardware" / "xlerobot_bimanual.yaml"
 
 
 # ==============================================================================
@@ -147,6 +152,97 @@ def merge_config_with_args(config: dict, args: argparse.Namespace) -> dict:
 
     return merged
 
+
+def load_central_hardware_config() -> Optional[dict]:
+    """
+    Load hardware configuration from central config file.
+
+    This ensures data collection uses the same port assignments as inference.
+    If the central config doesn't exist, returns None and uses hardcoded defaults.
+    """
+    if not CENTRAL_HARDWARE_CONFIG.exists():
+        print(f"Warning: Central hardware config not found: {CENTRAL_HARDWARE_CONFIG}")
+        print("         Using hardcoded defaults. Run 'python jdocs/scripts/hardware/scan_hardware.py' to create.")
+        return None
+
+    with open(CENTRAL_HARDWARE_CONFIG) as f:
+        config = yaml.safe_load(f)
+
+    print(f"Loaded central hardware config: {CENTRAL_HARDWARE_CONFIG}")
+    return config
+
+
+def update_arm_configs_from_central(arm_configs: dict) -> dict:
+    """
+    Update ARM_CONFIGS with values from central hardware config.
+
+    This ensures all scripts use consistent port assignments.
+    """
+    central = load_central_hardware_config()
+    if central is None:
+        return arm_configs
+
+    robot_cfg = central.get("robot", {})
+    teleop_cfg = central.get("teleop", {})
+    camera_cfg = central.get("cameras", {})
+
+    # Update bimanual config
+    if "bimanual" in arm_configs:
+        bimanual = arm_configs["bimanual"]
+
+        # Robot ports
+        if robot_cfg.get("left_arm", {}).get("port"):
+            bimanual["robot"]["left_arm_port"] = robot_cfg["left_arm"]["port"]
+        if robot_cfg.get("right_arm", {}).get("port"):
+            bimanual["robot"]["right_arm_port"] = robot_cfg["right_arm"]["port"]
+        if robot_cfg.get("left_arm", {}).get("id"):
+            bimanual["robot"]["left_arm_id"] = robot_cfg["left_arm"]["id"]
+        if robot_cfg.get("right_arm", {}).get("id"):
+            bimanual["robot"]["right_arm_id"] = robot_cfg["right_arm"]["id"]
+
+        # Teleop ports
+        if teleop_cfg.get("left_arm", {}).get("port"):
+            bimanual["teleop"]["left_arm_port"] = teleop_cfg["left_arm"]["port"]
+        if teleop_cfg.get("right_arm", {}).get("port"):
+            bimanual["teleop"]["right_arm_port"] = teleop_cfg["right_arm"]["port"]
+        if teleop_cfg.get("left_arm", {}).get("id"):
+            bimanual["teleop"]["left_arm_id"] = teleop_cfg["left_arm"]["id"]
+        if teleop_cfg.get("right_arm", {}).get("id"):
+            bimanual["teleop"]["right_arm_id"] = teleop_cfg["right_arm"]["id"]
+
+        # Camera indices
+        for cam_name in ["head", "left_wrist", "right_wrist"]:
+            if camera_cfg.get(cam_name, {}).get("index_or_path") is not None:
+                if cam_name in bimanual["cameras"]:
+                    bimanual["cameras"][cam_name]["index_or_path"] = camera_cfg[cam_name]["index_or_path"]
+
+    # Update left arm config
+    if "left" in arm_configs:
+        left = arm_configs["left"]
+        if robot_cfg.get("left_arm", {}).get("port"):
+            left["robot"]["port"] = robot_cfg["left_arm"]["port"]
+        if robot_cfg.get("left_arm", {}).get("id"):
+            left["robot"]["id"] = robot_cfg["left_arm"]["id"]
+        if teleop_cfg.get("left_arm", {}).get("port"):
+            left["teleop"]["port"] = teleop_cfg["left_arm"]["port"]
+        if teleop_cfg.get("left_arm", {}).get("id"):
+            left["teleop"]["id"] = teleop_cfg["left_arm"]["id"]
+
+    # Update right arm config
+    if "right" in arm_configs:
+        right = arm_configs["right"]
+        if robot_cfg.get("right_arm", {}).get("port"):
+            right["robot"]["port"] = robot_cfg["right_arm"]["port"]
+        if robot_cfg.get("right_arm", {}).get("id"):
+            right["robot"]["id"] = robot_cfg["right_arm"]["id"]
+        if teleop_cfg.get("right_arm", {}).get("port"):
+            right["teleop"]["port"] = teleop_cfg["right_arm"]["port"]
+        if teleop_cfg.get("right_arm", {}).get("id"):
+            right["teleop"]["id"] = teleop_cfg["right_arm"]["id"]
+
+    return arm_configs
+
+
 # Robot configuration - supports single arm and bimanual modes
 # Default: bimanual (both arms), can use --arm left/right for single arm mode
 ARM_CONFIGS = {
@@ -223,6 +319,10 @@ ARM_CONFIGS = {
         }
     }
 }
+
+# Update ARM_CONFIGS from central hardware config (if it exists)
+# This ensures consistency with inference scripts
+ARM_CONFIGS = update_arm_configs_from_central(ARM_CONFIGS)
 
 # Default arm selection - bimanual for dual-arm operation
 DEFAULT_ARM = "bimanual"
