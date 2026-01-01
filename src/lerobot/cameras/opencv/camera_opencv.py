@@ -128,10 +128,23 @@ class OpenCVCamera(Camera):
         self.rotation: int | None = get_cv2_rotation(config.rotation)
         self.backend: int = get_cv2_backend()
 
+        # Digital zoom: capture at higher resolution, crop to width x height
+        # If capture_width/capture_height are set, use those for camera capture
+        # Otherwise capture at width x height (no crop)
+        self.do_center_crop = config.capture_width is not None and config.capture_height is not None
+        self.crop_y_offset = config.crop_y_offset
+
         if self.height and self.width:
-            self.capture_width, self.capture_height = self.width, self.height
-            if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
-                self.capture_width, self.capture_height = self.height, self.width
+            if self.do_center_crop:
+                # Capture at higher resolution, will crop to width x height
+                self.capture_width, self.capture_height = config.capture_width, config.capture_height
+                if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+                    self.capture_width, self.capture_height = config.capture_height, config.capture_width
+            else:
+                # No crop, capture at output resolution
+                self.capture_width, self.capture_height = self.width, self.height
+                if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+                    self.capture_width, self.capture_height = self.height, self.width
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}({self.index_or_path})"
@@ -419,6 +432,20 @@ class OpenCVCamera(Camera):
         processed_image = image
         if requested_color_mode == ColorMode.RGB:
             processed_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Apply center crop if configured (for digital zoom effect)
+        # Crop from capture resolution to output resolution (self.width x self.height)
+        # crop_y_offset: negative = shift up (remove more from top), positive = shift down
+        if self.do_center_crop:
+            h, w = processed_image.shape[:2]
+            crop_x = (w - self.width) // 2
+            crop_y = (h - self.height) // 2 + self.crop_y_offset
+            # Clamp to valid range
+            crop_y = max(0, min(crop_y, h - self.height))
+            processed_image = processed_image[
+                crop_y : crop_y + self.height,
+                crop_x : crop_x + self.width
+            ]
 
         if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]:
             processed_image = cv2.rotate(processed_image, self.rotation)

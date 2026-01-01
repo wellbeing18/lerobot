@@ -62,6 +62,11 @@ class OpenCVCameraConfig(CameraConfig):
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
     warmup_s: int = 1
     fourcc: str | None = None
+    # For digital zoom: capture at higher resolution, then center crop to width x height
+    capture_width: int | None = None
+    capture_height: int | None = None
+    # Offset crop from center: positive = remove more from top, negative = remove more from bottom
+    crop_y_offset: int = 0
 
     def __post_init__(self) -> None:
         if self.color_mode not in (ColorMode.RGB, ColorMode.BGR):
@@ -83,3 +88,19 @@ class OpenCVCameraConfig(CameraConfig):
             raise ValueError(
                 f"`fourcc` must be a 4-character string (e.g., 'MJPG', 'YUYV'), but '{self.fourcc}' is provided."
             )
+
+        # Validate capture dimensions (for digital zoom/crop)
+        if (self.capture_width is None) != (self.capture_height is None):
+            raise ValueError(
+                "Both `capture_width` and `capture_height` must be specified together, or both must be None."
+            )
+
+        if self.capture_width is not None and self.capture_height is not None:
+            if self.width is not None and self.capture_width < self.width:
+                raise ValueError(
+                    f"`capture_width` ({self.capture_width}) must be >= `width` ({self.width})."
+                )
+            if self.height is not None and self.capture_height < self.height:
+                raise ValueError(
+                    f"`capture_height` ({self.capture_height}) must be >= `height` ({self.height})."
+                )
