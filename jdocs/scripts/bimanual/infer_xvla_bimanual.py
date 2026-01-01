@@ -71,7 +71,10 @@ DEFAULT_CHECKPOINT = "outputs/xvla_bimanual/checkpoints/020000/pretrained_model"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Task description (language prompt for xVLA)
-DEFAULT_TASK = "pick up the object and place it on the target"
+# Must match training task strings from tasks.parquet
+DEFAULT_TASK_LEFT = "Left arm pick up the tissue packet and place it on the plate"
+DEFAULT_TASK_RIGHT = "Right arm pick up the tissue packet and place it on the plate"
+DEFAULT_TASK = DEFAULT_TASK_LEFT  # Default to left arm task
 
 # Domain ID (must match training domain_id)
 # Use 21 for bimanual (different from single arm's 20)
@@ -100,12 +103,14 @@ TOTAL_DIM = LEFT_ARM_DIM + RIGHT_ARM_DIM  # 12
 # ============================================================================
 
 # Add project src to path
+# Script is at: jdocs/scripts/bimanual/ -> parents[2] to reach project root
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parents[1]
+PROJECT_ROOT = SCRIPT_DIR.parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 # Set dataset path (now that PROJECT_ROOT is defined)
-DATASET_PATH = str(PROJECT_ROOT / "datasets" / "bimanual_task")
+# Use merged dataset (same as training) for stats
+DATASET_PATH = str(PROJECT_ROOT / "datasets_bimanuel" / "bimanual" / "combined_pick_and_place")
 
 # Log directory
 LOG_DIR = PROJECT_ROOT / "jdocs" / "logs"
@@ -517,8 +522,18 @@ def main():
     parser.add_argument(
         "--task", "-t",
         type=str,
-        default=DEFAULT_TASK,
-        help=f"Task description for language conditioning (default: {DEFAULT_TASK})"
+        default=None,
+        help="Task description for language conditioning (overrides --left/--right)"
+    )
+    parser.add_argument(
+        "--left",
+        action="store_true",
+        help="Use left arm task (default)"
+    )
+    parser.add_argument(
+        "--right",
+        action="store_true",
+        help="Use right arm task"
     )
     parser.add_argument(
         "--domain-id",
@@ -562,6 +577,14 @@ def main():
     )
     args = parser.parse_args()
 
+    # Determine task based on flags
+    if args.task:
+        task = args.task
+    elif args.right:
+        task = DEFAULT_TASK_RIGHT
+    else:
+        task = DEFAULT_TASK_LEFT  # Default to left arm
+
     global logger
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = LOG_DIR / f"inference_xvla_bimanual_{timestamp}.log"
@@ -574,7 +597,7 @@ def main():
     logger.info("xVLA BIMANUAL Robot Inference for SO-101")
     logger.info("=" * 70)
     logger.info(f"Checkpoint:      {args.checkpoint}")
-    logger.info(f"Task:            {args.task}")
+    logger.info(f"Task:            {task}")
     logger.info(f"Domain ID:       {args.domain_id}")
     logger.info(f"Action Dim:      {TOTAL_DIM} (6 per arm)")
     logger.info(f"Duration:        {args.duration}s")
@@ -598,8 +621,10 @@ def main():
 
         logger.info("\nLoading dataset metadata...")
         from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+        # repo_id should match the dataset directory name
+        dataset_name = Path(args.dataset).name
         dataset_metadata = LeRobotDatasetMetadata(
-            repo_id="bimanual_task",
+            repo_id=dataset_name,
             root=args.dataset,
         )
         logger.info(f"  Dataset: {args.dataset}")
@@ -641,7 +666,7 @@ def main():
             postprocessor=postprocessor,
             cameras=cameras,
             robot=robot,
-            task=args.task,
+            task=task,
             domain_id=args.domain_id,
             max_duration=args.duration,
             action_interval=ACTION_INTERVAL,

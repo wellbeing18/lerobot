@@ -45,8 +45,9 @@ set -e  # Exit on error
 # =============================================================================
 
 # Get script directory and project root
+# Script is at: jdocs/scripts/bimanual/ -> go up 3 levels to reach project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 # Add lerobot src to PYTHONPATH
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
@@ -65,9 +66,10 @@ cd "${PROJECT_ROOT}"
 # =============================================================================
 
 # Dataset Configuration
-# CUSTOMIZE: Set your bimanual dataset path
-DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets/bimanual_task}"
-DATASET_NAME="${DATASET_NAME:-bimanual_task}"
+# Default to the combined left+right arm dataset for proof-of-concept bimanual training
+# Override DATASET_PATH for other datasets (e.g., handover, bimanual_pick)
+DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets_bimanuel/bimanual/combined_pick_and_place}"
+DATASET_NAME="${DATASET_NAME:-combined_pick_and_place}"
 
 # Pretrained Model
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/xvla-base}"
@@ -267,16 +269,10 @@ CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::Deprecati
     --wandb.enable=false \
     ${RESUME_FLAG}"
 
-# Camera name mapping for bimanual
-# Option A (2 cameras): head, left_wrist
-# Option B (3 cameras): head, left_wrist, right_wrist
-# xVLA expects: camera1, camera2, camera3
-#
-# For 2-camera setup:
-CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\"}"
-
-# For 3-camera setup, uncomment and use this instead:
-# CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\",\"observation.images.right_wrist\":\"observation.images.camera3\"}"
+# Camera name mapping for bimanual (3 cameras)
+# Maps: head->camera1, left_wrist->camera2, right_wrist->camera3
+# xVLA expects camera1, camera2, camera3 naming
+CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\",\"observation.images.right_wrist\":\"observation.images.camera3\"}"
 
 # =============================================================================
 # Run Training
