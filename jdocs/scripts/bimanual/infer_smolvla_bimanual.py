@@ -202,41 +202,60 @@ def load_hardware_config(config_path: str = None) -> dict:
 
 
 class CameraManager:
-    """Manage camera capture for bimanual setup."""
+    """Manage camera capture for bimanual setup with optional crop support."""
 
     def __init__(self, hw_config: dict):
         self.cameras = {}
+        self.crop_settings = {}  # Store crop settings per camera
         cam_config = hw_config.get("cameras", {})
 
         # Initialize head camera
         if "head" in cam_config:
             head_cfg = cam_config["head"]
+            # Use capture dimensions if specified, otherwise use output dimensions
+            cap_w = head_cfg.get("capture_width") or head_cfg.get("width", 640)
+            cap_h = head_cfg.get("capture_height") or head_cfg.get("height", 480)
             self.cameras["head"] = self._init_camera(
-                head_cfg.get("index_or_path", 4),
-                head_cfg.get("width", 640),
-                head_cfg.get("height", 480),
-                "head"
+                head_cfg.get("index_or_path", 4), cap_w, cap_h, "head"
             )
+            # Store crop settings if capture dimensions differ from output
+            if head_cfg.get("capture_width") and head_cfg.get("capture_height"):
+                self.crop_settings["head"] = {
+                    "output_width": head_cfg.get("width", 640),
+                    "output_height": head_cfg.get("height", 480),
+                    "crop_y_offset": head_cfg.get("crop_y_offset", 0),
+                }
+                logger.info(f"  head camera crop enabled: {cap_w}x{cap_h} -> {head_cfg.get('width', 640)}x{head_cfg.get('height', 480)}, y_offset={head_cfg.get('crop_y_offset', 0)}")
 
         # Initialize left wrist camera
         if "left_wrist" in cam_config:
             left_cfg = cam_config["left_wrist"]
+            cap_w = left_cfg.get("capture_width") or left_cfg.get("width", 640)
+            cap_h = left_cfg.get("capture_height") or left_cfg.get("height", 480)
             self.cameras["left_wrist"] = self._init_camera(
-                left_cfg.get("index_or_path", 6),
-                left_cfg.get("width", 640),
-                left_cfg.get("height", 480),
-                "left_wrist"
+                left_cfg.get("index_or_path", 6), cap_w, cap_h, "left_wrist"
             )
+            if left_cfg.get("capture_width") and left_cfg.get("capture_height"):
+                self.crop_settings["left_wrist"] = {
+                    "output_width": left_cfg.get("width", 640),
+                    "output_height": left_cfg.get("height", 480),
+                    "crop_y_offset": left_cfg.get("crop_y_offset", 0),
+                }
 
         # Initialize right wrist camera (optional)
         if "right_wrist" in cam_config:
             right_cfg = cam_config["right_wrist"]
+            cap_w = right_cfg.get("capture_width") or right_cfg.get("width", 640)
+            cap_h = right_cfg.get("capture_height") or right_cfg.get("height", 480)
             self.cameras["right_wrist"] = self._init_camera(
-                right_cfg.get("index_or_path", 8),
-                right_cfg.get("width", 640),
-                right_cfg.get("height", 480),
-                "right_wrist"
+                right_cfg.get("index_or_path", 8), cap_w, cap_h, "right_wrist"
             )
+            if right_cfg.get("capture_width") and right_cfg.get("capture_height"):
+                self.crop_settings["right_wrist"] = {
+                    "output_width": right_cfg.get("width", 640),
+                    "output_height": right_cfg.get("height", 480),
+                    "crop_y_offset": right_cfg.get("crop_y_offset", 0),
+                }
 
     def _init_camera(self, device_index: int, width: int, height: int, name: str) -> cv2.VideoCapture:
         """Initialize a single camera."""
@@ -256,13 +275,32 @@ class CameraManager:
         return cap
 
     def capture(self) -> dict:
-        """Capture frames from all cameras."""
+        """Capture frames from all cameras, applying crop if configured."""
         frames = {}
         for name, cap in self.cameras.items():
             ret, frame = cap.read()
             if not ret:
                 raise RuntimeError(f"Failed to capture from {name} camera")
-            frames[name] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Convert BGR to RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Apply crop if configured for this camera
+            if name in self.crop_settings:
+                crop = self.crop_settings[name]
+                h, w = frame.shape[:2]
+                out_w, out_h = crop["output_width"], crop["output_height"]
+                crop_y_offset = crop["crop_y_offset"]
+
+                # Calculate crop region (same math as LeRobot's OpenCVCamera)
+                crop_x = (w - out_w) // 2
+                crop_y = (h - out_h) // 2 + crop_y_offset
+                # Clamp to valid range
+                crop_y = max(0, min(crop_y, h - out_h))
+
+                frame = frame[crop_y:crop_y + out_h, crop_x:crop_x + out_w]
+
+            frames[name] = frame
         return frames
 
     def release(self):

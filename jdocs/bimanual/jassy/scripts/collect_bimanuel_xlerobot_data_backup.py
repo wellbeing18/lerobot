@@ -53,9 +53,6 @@ DATASETS_BASE = Path("/home/jrobot/project/lerobot/datasets_bimanuel")  # Bimanu
 DATASETS_BASE_LEGACY = Path("/home/jrobot/project/XLeRobot/datasets")  # Legacy single-arm datasets
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 
-# Default unified multi-task dataset name
-DEFAULT_MULTITASK_DATASET = "multitask"
-
 # CENTRAL HARDWARE CONFIG - Single source of truth for all port assignments
 # Run 'python jdocs/scripts/hardware/scan_hardware.py' if ports change after reboot
 CENTRAL_HARDWARE_CONFIG = LEROBOT_ROOT / "jdocs" / "configs" / "hardware" / "xlerobot_bimanual.yaml"
@@ -213,20 +210,11 @@ def update_arm_configs_from_central(arm_configs: dict) -> dict:
         if teleop_cfg.get("right_arm", {}).get("id"):
             bimanual["teleop"]["right_arm_id"] = teleop_cfg["right_arm"]["id"]
 
-        # Camera settings (index, crop, etc.)
+        # Camera indices
         for cam_name in ["head", "left_wrist", "right_wrist"]:
-            cam_cfg = camera_cfg.get(cam_name, {})
-            if cam_name in bimanual["cameras"]:
-                # Copy index
-                if cam_cfg.get("index_or_path") is not None:
-                    bimanual["cameras"][cam_name]["index_or_path"] = cam_cfg["index_or_path"]
-                # Copy crop settings (for digital zoom)
-                if cam_cfg.get("capture_width") is not None:
-                    bimanual["cameras"][cam_name]["capture_width"] = cam_cfg["capture_width"]
-                if cam_cfg.get("capture_height") is not None:
-                    bimanual["cameras"][cam_name]["capture_height"] = cam_cfg["capture_height"]
-                if cam_cfg.get("crop_y_offset") is not None:
-                    bimanual["cameras"][cam_name]["crop_y_offset"] = cam_cfg["crop_y_offset"]
+            if camera_cfg.get(cam_name, {}).get("index_or_path") is not None:
+                if cam_name in bimanual["cameras"]:
+                    bimanual["cameras"][cam_name]["index_or_path"] = camera_cfg[cam_name]["index_or_path"]
 
     # Update left arm config
     if "left" in arm_configs:
@@ -465,9 +453,9 @@ TASK_PRESETS = {
         "template": "Left arm pick up the {object} and place it on the {target}",
         "episode_time_s": 60,
         "reset_time_s": 30,
-        "recommended_episodes": 1,
-        "default_object": "orange",
-        "default_target": "bin",
+        "recommended_episodes": 10,
+        "default_object": "tissue packet",
+        "default_target": "plate",
         "description": "BIMANUAL: Left arm only pick-and-place (right arm stays idle)",
         "requires_bimanual": True,
         "phases": [
@@ -577,18 +565,12 @@ def validate_hardware(arm: str = "bimanual") -> tuple[bool, list[str]]:
     return len(issues) == 0, issues
 
 
-def get_dataset_path(
-    task_type: str,
-    arm: str = "bimanual",
-    multitask: bool = False,
-    dataset_name: Optional[str] = None
-) -> Path:
+def get_dataset_path(task_type: str, arm: str = "bimanual") -> Path:
     """
     Get the dataset directory path for a task type and arm configuration.
 
     Dataset organization:
         datasets_bimanuel/
-        ├── multitask/               # Unified multi-task dataset (when --multitask)
         ├── bimanual/                # Bimanual datasets (both arms)
         │   ├── pick/
         │   ├── handover/
@@ -603,15 +585,10 @@ def get_dataset_path(
     Args:
         task_type: Task primitive type (pick, place, handover, etc.)
         arm: Which arm configuration ("left", "right", or "bimanual")
-        multitask: If True, use unified multi-task dataset directory
-        dataset_name: Custom dataset name (used with --multitask)
 
     Returns:
         Path to dataset directory
     """
-    if multitask:
-        name = dataset_name or DEFAULT_MULTITASK_DATASET
-        return DATASETS_BASE / name
     return DATASETS_BASE / task_type
 
 
@@ -694,9 +671,7 @@ def generate_lerobot_command(
     task_string: str,
     num_episodes: int,
     arm: str = "bimanual",
-    resume: bool = False,
-    multitask: bool = False,
-    dataset_name: Optional[str] = None
+    resume: bool = False
 ) -> list[str]:
     """
     Generate the lerobot-record command.
@@ -707,14 +682,12 @@ def generate_lerobot_command(
         num_episodes: Number of episodes to record
         arm: Which arm to use ("left", "right", or "bimanual")
         resume: Whether to resume existing dataset
-        multitask: If True, use unified multi-task dataset
-        dataset_name: Custom dataset name (used with --multitask)
 
     Returns:
         Command as list of strings
     """
     preset = TASK_PRESETS[task_type]
-    dataset_path = get_dataset_path(task_type, arm, multitask, dataset_name)
+    dataset_path = get_dataset_path(task_type, arm)
     arm_config = ARM_CONFIGS[arm]
 
     # Build camera config JSON
@@ -722,11 +695,7 @@ def generate_lerobot_command(
 
     # Build repo_id - LeRobot expects format "username/dataset_name"
     # Using "local" as username for local datasets (not pushed to HuggingFace)
-    if multitask:
-        name = dataset_name or DEFAULT_MULTITASK_DATASET
-        repo_id = f"local/xlerobot_{arm}_{name}"
-    else:
-        repo_id = f"local/xlerobot_{arm}_{task_type}"
+    repo_id = f"local/xlerobot_{arm}_{task_type}"
 
     robot_cfg = arm_config["robot"]
     teleop_cfg = arm_config["teleop"]
@@ -1029,12 +998,7 @@ def run_recording(cmd: list[str], task_type: str, num_episodes: int) -> bool:
         return False
 
 
-def post_recording_summary(
-    task_type: str,
-    dataset_path: Path,
-    multitask: bool = False,
-    dataset_name: Optional[str] = None
-) -> None:
+def post_recording_summary(task_type: str, dataset_path: Path) -> None:
     """Show summary after recording."""
     print_header("Recording Complete")
 
@@ -1043,15 +1007,13 @@ def post_recording_summary(
     if exists:
         print(f"Dataset: {dataset_path}")
         print(f"Total episodes: {episode_count}")
-        if multitask:
-            print(f"Mode: MULTI-TASK (unified dataset)")
         print()
 
         print("Dataset structure:")
         print(f"  {dataset_path}/")
         print("  ├── meta/")
         print("  │   ├── info.json")
-        print("  │   ├── tasks.parquet    # Task registry (multi-task)")
+        print("  │   ├── tasks.jsonl")
         print("  │   └── stats.json")
         print("  ├── data/chunk-000/")
         print("  └── videos/")
@@ -1066,16 +1028,8 @@ def post_recording_summary(
         print(f"     # Update train_pi05_mini_mvp.sh with:")
         print(f"     DATASET_PATH=\"{dataset_path}\"")
         print()
-
-        if multitask:
-            print("  3. Add another task to this dataset:")
-            print(f"     python scripts/collect_xlerobot_data.py --task <NEW_TASK> -n 10")
-            print()
-            print("  4. View all tasks in dataset:")
-            print(f"     python -c \"import pandas as pd; print(pd.read_parquet('{dataset_path}/meta/tasks.parquet'))\"")
-        else:
-            print("  3. Add more episodes (resume):")
-            print(f"     python scripts/collect_xlerobot_data.py --task {task_type} --resume")
+        print("  3. Add more episodes (resume):")
+        print(f"     python scripts/collect_xlerobot_data.py --task {task_type} --resume")
         print()
     else:
         print("Warning: Dataset metadata not found. Recording may have failed.")
@@ -1144,18 +1098,6 @@ Examples:
         help="Resume adding episodes to existing dataset"
     )
     parser.add_argument(
-        "--multitask", "-m",
-        action="store_true",
-        help="Use unified multi-task dataset (all tasks in one dataset). "
-             "Automatically resumes if dataset exists."
-    )
-    parser.add_argument(
-        "--dataset-name",
-        type=str,
-        default=None,
-        help="Custom dataset name for multi-task mode (default: 'multitask')"
-    )
-    parser.add_argument(
         "--skip-validation",
         action="store_true",
         help="Skip hardware validation (use with caution)"
@@ -1222,40 +1164,6 @@ Examples:
                 print("  - For bimanual, ensure both arms are connected")
             sys.exit(1)
 
-    # Interactive multi-task mode selection (if not specified via CLI)
-    if not args.multitask and args.dataset_name is None:
-        print_section("Dataset Mode Selection")
-        print("Choose how to organize your dataset:")
-        print()
-        print("  [1] MULTI-TASK (Recommended)")
-        print("      - All tasks in ONE unified dataset")
-        print("      - Auto-resumes when you add more tasks")
-        print("      - Ready for multi-task training")
-        print()
-        print("  [2] SINGLE-TASK (Legacy)")
-        print("      - Separate dataset per task type")
-        print("      - Requires merging later for multi-task training")
-        print()
-
-        while True:
-            choice = input("Select mode [1/2] (default: 1): ").strip()
-            if choice in ["", "1"]:
-                args.multitask = True
-                print()
-                # Ask for dataset name
-                print("Dataset name (press Enter for 'multitask'):")
-                name_input = input("  Name: ").strip()
-                if name_input:
-                    args.dataset_name = name_input
-                print()
-                break
-            elif choice == "2":
-                args.multitask = False
-                print()
-                break
-            else:
-                print("Please enter 1 or 2")
-
     # Determine task from config, CLI, or interactive mode
     task_config = config.get("data_collection", {}).get("task", {})
     task_type = args.task or task_config.get("type")
@@ -1306,18 +1214,8 @@ Examples:
     )
 
     # Check existing dataset
-    dataset_path = get_dataset_path(task_type, arm, args.multitask, args.dataset_name)
+    dataset_path = get_dataset_path(task_type, arm)
     exists, current_episodes = check_existing_dataset(dataset_path)
-
-    # In multitask mode, automatically resume if dataset exists
-    if args.multitask and exists and not args.resume:
-        print_section("Multi-Task Mode: Existing Dataset Found")
-        print(f"Dataset: {dataset_path}")
-        print(f"Current episodes: {current_episodes}")
-        print(f"New task: \"{task_string}\"")
-        print()
-        print("Auto-resuming in multi-task mode (adding new task to existing dataset)")
-        args.resume = True
 
     if exists and not args.resume:
         print_section("Existing Dataset Found")
@@ -1333,10 +1231,6 @@ Examples:
     # Show configuration
     print_section("Configuration")
     print(f"Arm: {arm.upper()}")
-    if args.multitask:
-        print(f"Mode: MULTI-TASK (unified dataset)")
-        if args.dataset_name:
-            print(f"Dataset Name: {args.dataset_name}")
     print(f"Task Type: {task_type}")
     print(f"Task String: \"{task_string}\"")
     print(f"Episode Time: {preset['episode_time_s']} seconds")
@@ -1346,9 +1240,9 @@ Examples:
     print(f"Camera FPS: {list(arm_config['cameras'].values())[0]['fps']} fps")
     print(f"Dataset: {dataset_path}")
     if args.resume:
-        print(f"Recording Mode: RESUME (adding to {current_episodes} existing episodes)")
+        print(f"Mode: RESUME (adding to {current_episodes} existing episodes)")
     else:
-        print("Recording Mode: NEW DATASET")
+        print("Mode: NEW DATASET")
 
     # Generate command
     cmd = generate_lerobot_command(
@@ -1356,9 +1250,7 @@ Examples:
         task_string=task_string,
         num_episodes=num_episodes,
         arm=arm,
-        resume=args.resume,
-        multitask=args.multitask,
-        dataset_name=args.dataset_name
+        resume=args.resume
     )
 
     # Dry run - just show command
@@ -1382,21 +1274,13 @@ Examples:
 
     # Post-recording summary
     if success:
-        post_recording_summary(task_type, dataset_path, args.multitask, args.dataset_name)
+        post_recording_summary(task_type, dataset_path)
 
         # Save effective configuration to dataset directory for reproducibility
-        if args.multitask:
-            ds_name = args.dataset_name or DEFAULT_MULTITASK_DATASET
-            experiment_name = f"xlerobot_{arm}_{ds_name}"
-        else:
-            experiment_name = f"xlerobot_{arm}_{task_type}"
-
         effective_config = {
             "experiment": {
-                "name": experiment_name,
+                "name": f"xlerobot_{arm}_{task_type}",
                 "date": datetime.now().isoformat(),
-                "multitask": args.multitask,
-                "dataset_name": args.dataset_name,
             },
             "hardware": {
                 "arm": arm,

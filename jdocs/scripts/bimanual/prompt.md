@@ -36,6 +36,11 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training.log
       --right \
       --duration 20
 
+  python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      -c outputs/smolvla_bimanual_20251231_175051/checkpoints/020000/pretrained_model \
+      --left \
+      --duration 20
+
 - Run inference for LEFT arm task (default)
   python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20251231_175051/checkpoints/020000/pretrained_model \
