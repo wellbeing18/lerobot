@@ -67,9 +67,33 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Task description (language prompt for SmolVLA)
 # Must match training task strings from tasks.parquet
-DEFAULT_TASK_LEFT = "Left arm pick up the tissue packet and place it on the plate"
-DEFAULT_TASK_RIGHT = "Right arm pick up the tissue packet and place it on the plate"
+# Format: "Use {arm} arm to pick up the {object} and place it {in/on} the {target}"
+DEFAULT_TASK_LEFT = "Use left arm to pick up the orange and place it on the plate"
+DEFAULT_TASK_RIGHT = "Use right arm to pick up the orange and place it on the plate"
 DEFAULT_TASK = DEFAULT_TASK_LEFT  # Default to left arm task
+
+# Task examples from multitasks dataset (15+ tasks)
+# Use --task-key to select, or --task for custom string
+TASK_EXAMPLES = {
+    # Plate tasks (objects -> plate)
+    "left_orange_plate": "Use left arm to pick up the orange and place it on the plate",
+    "right_orange_plate": "Use right arm to pick up the orange and place it on the plate",
+    "left_bread_plate": "Use left arm to pick up the bread and place it on the plate",
+    "right_bread_plate": "Use right arm to pick up the bread and place it on the plate",
+    "left_corn_plate": "Use left arm to pick up the corn and place it on the plate",
+    "right_corn_plate": "Use right arm to pick up the corn and place it on the plate",
+    "left_banana_plate": "Use left arm to pick up the banana and place it on the plate",
+    "right_banana_plate": "Use right arm to pick up the banana and place it on the plate",
+    # Bin tasks (objects -> bin)
+    "left_icecream_bin": "Use left arm to pick up the ice cream and place it in the bin",
+    "right_icecream_bin": "Use right arm to pick up the ice cream and place it in the bin",
+    "left_ketchup_bin": "Use left arm to pick up the ketchup bottle and place it in the bin",
+    "right_ketchup_bin": "Use right arm to pick up the ketchup bottle and place it in the bin",
+    "left_yogurt_bin": "Use left arm to pick up the yogurt bottle and place it in the bin",
+    "right_yogurt_bin": "Use right arm to pick up the yogurt bottle and place it in the bin",
+    "left_tissue_bin": "Use left arm to pick up the used tissue and place it in the bin",
+    "right_tissue_bin": "Use right arm to pick up the used tissue and place it in the bin",
+}
 
 # Inference Settings
 ACTION_INTERVAL = 0.033   # 30Hz execution rate (1/30 seconds)
@@ -120,8 +144,8 @@ PROJECT_ROOT = SCRIPT_DIR.parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 # Set dataset path (now that PROJECT_ROOT is defined)
-# Use merged dataset (same as training) for stats
-DATASET_PATH = str(PROJECT_ROOT / "datasets_bimanuel" / "bimanual" / "combined_pick_and_place")
+# Use multitasks dataset (same as training) for stats
+DATASET_PATH = str(PROJECT_ROOT / "datasets_bimanuel" / "multitasks")
 
 # Log directory
 LOG_DIR = PROJECT_ROOT / "jdocs" / "logs"
@@ -816,6 +840,13 @@ def main():
         help="Use right arm task"
     )
     parser.add_argument(
+        "--task-key", "-k",
+        type=str,
+        choices=list(TASK_EXAMPLES.keys()),
+        default=None,
+        help=f"Task key from TASK_EXAMPLES (e.g., 'left_orange_plate', 'right_ketchup_bin')"
+    )
+    parser.add_argument(
         "--freeze-left",
         action="store_true",
         help="Freeze left arm (hold current position, don't send model actions)"
@@ -901,9 +932,16 @@ def main():
     else:
         DIAGNOSTIC_MODE = args.diagnostic
 
-    # Determine task based on flags
+    # Determine task based on flags (priority: --task > --task-key > --right > default left)
     if args.task:
         task = args.task
+    elif args.task_key:
+        task = TASK_EXAMPLES.get(args.task_key)
+        if not task:
+            raise ValueError(
+                f"Unknown task key: {args.task_key}. "
+                f"Available: {list(TASK_EXAMPLES.keys())}"
+            )
     elif args.right:
         task = DEFAULT_TASK_RIGHT
     else:

@@ -462,11 +462,11 @@ TASK_PRESETS = {
         ]
     },
     "left_arm_pick_and_place": {
-        "template": "Left arm pick up the {object} and place it on the {target}",
+        "template": "Use left arm to pick up the {object} and place it in the {target}",
         "episode_time_s": 60,
-        "reset_time_s": 30,
-        "recommended_episodes": 1,
-        "default_object": "orange",
+        "reset_time_s": 15,
+        "recommended_episodes": 20,
+        "default_object": "used tissue",
         "default_target": "bin",
         "description": "BIMANUAL: Left arm only pick-and-place (right arm stays idle)",
         "requires_bimanual": True,
@@ -480,12 +480,12 @@ TASK_PRESETS = {
         ]
     },
     "right_arm_pick_and_place": {
-        "template": "Right arm pick up the {object} and place it on the {target}",
+        "template": "Use right arm to pick up the {object} and place it in the {target}",
         "episode_time_s": 60,
-        "reset_time_s": 30,
-        "recommended_episodes": 10,
-        "default_object": "tissue packet",
-        "default_target": "plate",
+        "reset_time_s": 15,
+        "recommended_episodes": 20,
+        "default_object": "used tissue",
+        "default_target": "bin",
         "description": "BIMANUAL: Right arm only pick-and-place (left arm stays idle)",
         "requires_bimanual": True,
         "phases": [

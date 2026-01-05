@@ -64,13 +64,14 @@ cd "${PROJECT_ROOT}"
 # =============================================================================
 
 # Dataset Configuration
-# Default to left_arm_pick_and_place for proof-of-concept bimanual training
-# This dataset has 12D actions (both arms recorded) with 2 tasks:
-#   Task 0: "Left arm pick up the tissue packet..."
-#   Task 1: "Right arm pick up the tissue packet..."
-# Override DATASET_PATH for other datasets
-DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets_bimanuel/bimanual/combined_pick_and_place}"
-DATASET_NAME="${DATASET_NAME:-combined_pick_and_place}"
+# Default to multitasks dataset for multi-task bimanual training
+# This dataset has 12D actions (both arms recorded) with 14 tasks:
+#   - 8 plate tasks: left/right arm pick {orange,bread,corn,banana} -> plate
+#   - 6 bin tasks: left/right arm pick {ice cream,ketchup,yogurt} -> bin
+# Task format: "Use {arm} arm to pick up the {object} and place it {in/on} the {target}"
+# Override DATASET_PATH for other datasets (e.g., single-task datasets)
+DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets_bimanuel/multitasks}"
+DATASET_NAME="${DATASET_NAME:-multitasks}"
 
 # Pretrained Model
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/smolvla_base}"
