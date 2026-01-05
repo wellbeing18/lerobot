@@ -170,7 +170,62 @@ cameras:
 
 ## Usage: When Hardware Ports Change
 
-### Step 1: Run Hardware Scanner
+### Option A: Interactive Port Identification Script
+
+The most reliable method - physically wiggles each arm to identify ports:
+
+```bash
+# Run the identification script
+python jdocs/scripts/hardware/identify_ports.py
+```
+
+This will:
+1. Wiggle each port (ACM0, ACM1, ACM2, ACM3) one by one
+2. Ask you which physical arm moved for each port
+3. Print results to copy
+
+**Input options:**
+- `lf` = Left Follower
+- `rf` = Right Follower
+- `ll` = Left Leader
+- `rl` = Right Leader
+- `n` = None/didn't move
+
+### Option B: Using Claude Code
+
+If you're working with Claude Code, simply tell Claude what happened during the identification:
+
+```
+User: "I ran identify_ports.py and got:
+  /dev/ttyACM0 = Right Follower
+  /dev/ttyACM1 = Left Follower
+  /dev/ttyACM2 = Left Leader
+  /dev/ttyACM3 = Right Leader"
+
+Claude: [Updates jdocs/configs/hardware/xlerobot_bimanual.yaml automatically]
+```
+
+Claude will update the config file at `jdocs/configs/hardware/xlerobot_bimanual.yaml` with the correct port mappings.
+
+### Option C: Manual Config Update
+
+Edit `jdocs/configs/hardware/xlerobot_bimanual.yaml` directly:
+
+```yaml
+robot:
+  left_arm:
+    port: /dev/ttyACM1    # <-- Set to your Left Follower port
+  right_arm:
+    port: /dev/ttyACM0    # <-- Set to your Right Follower port
+
+teleop:
+  left_arm:
+    port: /dev/ttyACM2    # <-- Set to your Left Leader port
+  right_arm:
+    port: /dev/ttyACM3    # <-- Set to your Right Leader port
+```
+
+### Option D: Hardware Scanner (Less Reliable)
 
 ```bash
 # Check current hardware status
@@ -179,18 +234,25 @@ python jdocs/scripts/hardware/scan_hardware.py
 # Test device connectivity
 python jdocs/scripts/hardware/scan_hardware.py --test
 
-# Interactive identification (if ports are swapped)
+# Interactive identification (uses wiggle test)
 python jdocs/scripts/hardware/scan_hardware.py --identify --update
 ```
 
-### Step 2: Verify Configuration
+**Note:** The scanner's `--identify` mode may not work reliably if the `pyserial` module is not installed in the current environment.
+
+### Verification
+
+After updating, verify the config:
 
 ```bash
 # Show current config
 python jdocs/scripts/hardware/hardware_config.py
+
+# Or check directly
+cat jdocs/configs/hardware/xlerobot_bimanual.yaml | grep -A2 "left_arm:\|right_arm:"
 ```
 
-### Step 3: All Scripts Automatically Use Updated Config
+### All Scripts Automatically Use Updated Config
 
 No need to edit individual scripts! They all load from the central config.
 
@@ -252,4 +314,32 @@ ls ~/.cache/huggingface/lerobot/calibration/robots/so101_follower/
 | Does port change affect inference? | YES - must update config |
 | Is bi_so101_follower calibration missing? | NO - uses so101_follower internally |
 | Single source of truth? | `xlerobot_bimanual.yaml` |
-| How to detect port changes? | Run `scan_hardware.py` |
+| How to detect port changes? | Run `identify_ports.py` |
+
+## Quick Reference
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `jdocs/configs/hardware/xlerobot_bimanual.yaml` | Central config (edit this) |
+| `jdocs/scripts/hardware/identify_ports.py` | Interactive port identification |
+| `jdocs/scripts/hardware/scan_hardware.py` | Hardware scanner utility |
+| `jdocs/scripts/hardware/hardware_config.py` | Config loader module |
+
+### Quick Fix for Swapped Ports
+
+```bash
+# 1. Identify which arm is on which port
+python jdocs/scripts/hardware/identify_ports.py
+
+# 2. Copy results to Claude or edit config manually
+#    Config file: jdocs/configs/hardware/xlerobot_bimanual.yaml
+
+# 3. Verify
+cat jdocs/configs/hardware/xlerobot_bimanual.yaml | grep port
+
+# 4. Run inference
+python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+    --checkpoint outputs/smolvla_bimanual_*/checkpoints/040000/pretrained_model
+```
