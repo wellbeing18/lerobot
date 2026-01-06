@@ -21,6 +21,17 @@ tail -f jdocs/logs/train_smolvla_pickplace_20251225_163013.log
     --task "pick up the block and place it on the plate"
 
 # bimanual
+
+## todos
+1) generalizatin
+- docs/design/vla_generalization_proposal.md
+  - unfreeze 
+
+1) demo system
+- demo and debug and improve
+- website
+
+
 ## smolvla
 ### train 
 
