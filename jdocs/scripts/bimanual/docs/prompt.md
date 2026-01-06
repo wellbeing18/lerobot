@@ -25,11 +25,17 @@ tail -f jdocs/logs/train_smolvla_pickplace_20251225_163013.log
 ## todos
 1) generalizatin
 - docs/design/vla_generalization_proposal.md
-  - unfreeze 
+  - unfreeze llm for smolvla
+  - unfreeze llm for xvla: and or multi domain ids
+  - try pi0.5 & groot 1.6 full finetuning?
+  - cloud training 
+
+now you need to 1) assess whether we can support full finetuning smolvla(unfreeze everything) on my laptop rtx 5090 24GB vram 2) do research and analysis how to use pi0.5 lerobot or openai version(you can reference /home/jrobot/project/refs/openpi/LEROBOT_VS_OPENPI_INVESTIGATION.md), groot 1.5 or 1.6(i prefer 1.6 as it is newly, and I had successfully single arm trained groot1.6 as under /home/jrobot/project/Isaac-GR00T/custom/scripts/ver1_6). for you research, you should analyze whether we should do full finetuning, or partially unfreeze key components like vision encoder, language model, action model, as our goal is to make finetuning vla more general as expected in /home/jrobot/project/robotAgent/docs/design/vla_generalization_proposal.md(we encountered finetuned smolvla model on multi-tasks dataset which works well for tasks inside the dataset, but if we try task name with unseen objects in trained tasks, or reorganize task with different task name like seen object but to different target place than in trained task, vla ignores the task name and followed the trained trajectory). so we want to know whether we use more powerful vlas like pi0.5 groot 1.6 can solve the issue, or we need to do full finetuning(as current finetuned smolvla trained with language module frozen) 3) if we need to train pi0.5 and/or groot1.6, we could need to use cloud to do training, so you need to help prepare training script for pi0.5 and/or groot 1.6 for the bimanual dataset: datasets_bimanuel/multitasks. and put them under jdocs/scripts/cloud with guide.md
 
 1) demo system
 - demo and debug and improve
 - website
+- movable
 
 
 ## smolvla
