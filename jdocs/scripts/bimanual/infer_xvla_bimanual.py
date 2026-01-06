@@ -72,13 +72,39 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Task description (language prompt for xVLA)
 # Must match training task strings from tasks.parquet
-DEFAULT_TASK_LEFT = "Left arm pick up the tissue packet and place it on the plate"
-DEFAULT_TASK_RIGHT = "Right arm pick up the tissue packet and place it on the plate"
+# Format: "Use {arm} arm to pick up the {object} and place it {in/on} the {target}"
+DEFAULT_TASK_LEFT = "Use left arm to pick up the orange and place it on the plate"
+DEFAULT_TASK_RIGHT = "Use right arm to pick up the orange and place it on the plate"
 DEFAULT_TASK = DEFAULT_TASK_LEFT  # Default to left arm task
 
+# Task examples from multitasks dataset (16 tasks)
+# Use --task-key to select, or --task for custom string
+TASK_EXAMPLES = {
+    # Plate tasks (objects -> plate)
+    "left_orange_plate": "Use left arm to pick up the orange and place it on the plate",
+    "right_orange_plate": "Use right arm to pick up the orange and place it on the plate",
+    "left_bread_plate": "Use left arm to pick up the bread and place it on the plate",
+    "right_bread_plate": "Use right arm to pick up the bread and place it on the plate",
+    "left_corn_plate": "Use left arm to pick up the corn and place it on the plate",
+    "right_corn_plate": "Use right arm to pick up the corn and place it on the plate",
+    "left_banana_plate": "Use left arm to pick up the banana and place it on the plate",
+    "right_banana_plate": "Use right arm to pick up the banana and place it on the plate",
+    # Bin tasks (objects -> bin)
+    "left_icecream_bin": "Use left arm to pick up the ice cream and place it in the bin",
+    "right_icecream_bin": "Use right arm to pick up the ice cream and place it in the bin",
+    "left_ketchup_bin": "Use left arm to pick up the ketchup bottle and place it in the bin",
+    "right_ketchup_bin": "Use right arm to pick up the ketchup bottle and place it in the bin",
+    "left_yogurt_bin": "Use left arm to pick up the yogurt bottle and place it in the bin",
+    "right_yogurt_bin": "Use right arm to pick up the yogurt bottle and place it in the bin",
+    "left_tissue_bin": "Use left arm to pick up the used tissue and place it in the bin",
+    "right_tissue_bin": "Use right arm to pick up the used tissue and place it in the bin",
+}
+
 # Domain ID (must match training domain_id)
-# Use 21 for bimanual (different from single arm's 20)
-DEFAULT_DOMAIN_ID = 21
+# The XVLAAddDomainIdProcessorStep defaults to 0
+# Since our dataset has no domain_id column, training uses 0
+# Keep this at 0 unless training script explicitly sets a different domain_id
+DEFAULT_DOMAIN_ID = 0
 
 # Inference Settings
 ACTION_INTERVAL = 0.033   # 30Hz execution rate (1/30 seconds)
@@ -129,8 +155,8 @@ PROJECT_ROOT = SCRIPT_DIR.parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 # Set dataset path (now that PROJECT_ROOT is defined)
-# Use merged dataset (same as training) for stats
-DATASET_PATH = str(PROJECT_ROOT / "datasets_bimanuel" / "bimanual" / "combined_pick_and_place")
+# Use multitasks dataset (same as training) for stats
+DATASET_PATH = str(PROJECT_ROOT / "datasets_bimanuel" / "multitasks")
 
 # Log directory
 LOG_DIR = PROJECT_ROOT / "jdocs" / "logs"
@@ -211,41 +237,60 @@ def load_hardware_config(config_path: str = None) -> dict:
 
 
 class CameraManager:
-    """Manage camera capture for bimanual setup."""
+    """Manage camera capture for bimanual setup with optional crop support."""
 
     def __init__(self, hw_config: dict):
         self.cameras = {}
+        self.crop_settings = {}  # Store crop settings per camera
         cam_config = hw_config.get("cameras", {})
 
         # Initialize head camera
         if "head" in cam_config:
             head_cfg = cam_config["head"]
+            # Use capture dimensions if specified, otherwise use output dimensions
+            cap_w = head_cfg.get("capture_width") or head_cfg.get("width", 640)
+            cap_h = head_cfg.get("capture_height") or head_cfg.get("height", 480)
             self.cameras["head"] = self._init_camera(
-                head_cfg.get("index_or_path", 4),
-                head_cfg.get("width", 640),
-                head_cfg.get("height", 480),
-                "head"
+                head_cfg.get("index_or_path", 4), cap_w, cap_h, "head"
             )
+            # Store crop settings if capture dimensions differ from output
+            if head_cfg.get("capture_width") and head_cfg.get("capture_height"):
+                self.crop_settings["head"] = {
+                    "output_width": head_cfg.get("width", 640),
+                    "output_height": head_cfg.get("height", 480),
+                    "crop_y_offset": head_cfg.get("crop_y_offset", 0),
+                }
+                logger.info(f"  head camera crop enabled: {cap_w}x{cap_h} -> {head_cfg.get('width', 640)}x{head_cfg.get('height', 480)}, y_offset={head_cfg.get('crop_y_offset', 0)}")
 
         # Initialize left wrist camera
         if "left_wrist" in cam_config:
             left_cfg = cam_config["left_wrist"]
+            cap_w = left_cfg.get("capture_width") or left_cfg.get("width", 640)
+            cap_h = left_cfg.get("capture_height") or left_cfg.get("height", 480)
             self.cameras["left_wrist"] = self._init_camera(
-                left_cfg.get("index_or_path", 6),
-                left_cfg.get("width", 640),
-                left_cfg.get("height", 480),
-                "left_wrist"
+                left_cfg.get("index_or_path", 6), cap_w, cap_h, "left_wrist"
             )
+            if left_cfg.get("capture_width") and left_cfg.get("capture_height"):
+                self.crop_settings["left_wrist"] = {
+                    "output_width": left_cfg.get("width", 640),
+                    "output_height": left_cfg.get("height", 480),
+                    "crop_y_offset": left_cfg.get("crop_y_offset", 0),
+                }
 
         # Initialize right wrist camera (optional)
         if "right_wrist" in cam_config:
             right_cfg = cam_config["right_wrist"]
+            cap_w = right_cfg.get("capture_width") or right_cfg.get("width", 640)
+            cap_h = right_cfg.get("capture_height") or right_cfg.get("height", 480)
             self.cameras["right_wrist"] = self._init_camera(
-                right_cfg.get("index_or_path", 8),
-                right_cfg.get("width", 640),
-                right_cfg.get("height", 480),
-                "right_wrist"
+                right_cfg.get("index_or_path", 8), cap_w, cap_h, "right_wrist"
             )
+            if right_cfg.get("capture_width") and right_cfg.get("capture_height"):
+                self.crop_settings["right_wrist"] = {
+                    "output_width": right_cfg.get("width", 640),
+                    "output_height": right_cfg.get("height", 480),
+                    "crop_y_offset": right_cfg.get("crop_y_offset", 0),
+                }
 
     def _init_camera(self, device_index: int, width: int, height: int, name: str) -> cv2.VideoCapture:
         """Initialize a single camera."""
@@ -265,13 +310,32 @@ class CameraManager:
         return cap
 
     def capture(self) -> dict:
-        """Capture frames from all cameras."""
+        """Capture frames from all cameras, applying crop if configured."""
         frames = {}
         for name, cap in self.cameras.items():
             ret, frame = cap.read()
             if not ret:
                 raise RuntimeError(f"Failed to capture from {name} camera")
-            frames[name] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Convert BGR to RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Apply crop if configured for this camera
+            if name in self.crop_settings:
+                crop = self.crop_settings[name]
+                h, w = frame.shape[:2]
+                out_w, out_h = crop["output_width"], crop["output_height"]
+                crop_y_offset = crop["crop_y_offset"]
+
+                # Calculate crop region (same math as LeRobot's OpenCVCamera)
+                crop_x = (w - out_w) // 2
+                crop_y = (h - out_h) // 2 + crop_y_offset
+                # Clamp to valid range
+                crop_y = max(0, min(crop_y, h - out_h))
+
+                frame = frame[crop_y:crop_y + out_h, crop_x:crop_x + out_w]
+
+            frames[name] = frame
         return frames
 
     def release(self):
@@ -543,13 +607,16 @@ def format_observation(
 ) -> dict:
     """Format observation for xVLA bimanual policy input.
 
-    xVLA expects:
+    xVLA expects (after training rename mapping):
         observation.state: (B=1, D=12) float32 tensor (bimanual: 6 per arm)
-        observation.images.camera1: (B=1, C=3, H, W) float32 tensor [0, 1]
-        observation.images.camera2: (B=1, C=3, H, W) float32 tensor [0, 1]
-        observation.images.camera3: (B=1, C=3, H, W) float32 tensor [0, 1] (optional)
+        observation.images.image: (B=1, C=3, H, W) float32 tensor [0, 1] (head camera)
+        observation.images.image2: (B=1, C=3, H, W) float32 tensor [0, 1] (left wrist)
+        observation.images.image3: (B=1, C=3, H, W) float32 tensor [0, 1] (right wrist)
         task: str (language description)
         domain_id: int (robot configuration identifier)
+
+    NOTE: Camera mapping must match training script's rename_map:
+        head -> image, left_wrist -> image2, right_wrist -> image3
     """
     observation = {}
 
@@ -557,10 +624,11 @@ def format_observation(
     observation["observation.state"] = torch.from_numpy(state).float().unsqueeze(0).to(device)
 
     # Images: map camera names to xVLA expected names
+    # Must match training script's rename_map!
     key_mapping = {
-        "head": "camera1",
-        "left_wrist": "camera2",
-        "right_wrist": "camera3",
+        "head": "image",          # head -> observation.images.image
+        "left_wrist": "image2",   # left_wrist -> observation.images.image2
+        "right_wrist": "image3",  # right_wrist -> observation.images.image3
     }
 
     for name, frame in images.items():
@@ -791,6 +859,13 @@ def main():
         help="Use right arm task"
     )
     parser.add_argument(
+        "--task-key", "-k",
+        type=str,
+        choices=list(TASK_EXAMPLES.keys()),
+        default=None,
+        help=f"Task key from TASK_EXAMPLES (e.g., 'left_orange_plate', 'right_ketchup_bin')"
+    )
+    parser.add_argument(
         "--freeze-left",
         action="store_true",
         help="Freeze left arm (hold current position, don't send model actions)"
@@ -882,9 +957,16 @@ def main():
     else:
         DIAGNOSTIC_MODE = args.diagnostic
 
-    # Determine task based on flags
+    # Determine task based on flags (priority: --task > --task-key > --right > default left)
     if args.task:
         task = args.task
+    elif args.task_key:
+        task = TASK_EXAMPLES.get(args.task_key)
+        if not task:
+            raise ValueError(
+                f"Unknown task key: {args.task_key}. "
+                f"Available: {list(TASK_EXAMPLES.keys())}"
+            )
     elif args.right:
         task = DEFAULT_TASK_RIGHT
     else:
@@ -953,9 +1035,13 @@ def main():
             dataset_stats=dataset_metadata.stats,
             preprocessor_overrides={
                 "device_processor": {"device": args.device},
+                # CRITICAL: domain_id must match training (21 for bimanual)
+                # XVLAAddDomainIdProcessorStep uses this to select soft prompts
+                "xvla_add_domain_id": {"domain_id": args.domain_id},
             },
         )
         logger.info("  Preprocessor and postprocessor created")
+        logger.info(f"  Domain ID: {args.domain_id} (used for soft prompt selection)")
 
         logger.info("\nInitializing bimanual hardware...")
         cameras = CameraManager(hw_config)

@@ -129,12 +129,85 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitask
 
 
 ### train
+<!-- 60k, batch 16: 12.5 epochs, 80k/16: 17 epochs, 120k/12: 18.8 -->
 
-  nohup env FREEZE_VISION=false MAX_STEPS=80000 BATCH_SIZE=16 \
+  nohup env FREEZE_VISION=false MAX_STEPS=120000 BATCH_SIZE=12 \
     bash jdocs/scripts/bimanual/train_xvla_bimanual.sh \
     > outputs/xvla_bimanual_training_multitasks.log 2>&1 &
 
 tail -f outputs/xvla_bimanual_training_multitasks.log
+
+ Current Situation
+
+  | Aspect                 | Status                       |
+  |------------------------|------------------------------|
+  | Training domain_id     | 0 (default for all 16 tasks) |
+  | Soft prompt slots used | 1 out of 30                  |
+  | Task differentiation   | Language conditioning only   |
+
+  Impact on Current Training
+
+  The model will still work, but:
+  - All 16 tasks share the same soft prompt (slot 0)
+  - XVLA's multi-domain capability is not leveraged
+  - Task differentiation relies purely on language strings (like SmolVLA)
+
+  Impact on Generalization Testing (from your proposal)
+
+  Looking at Section 4.1 of your proposal:
+  "Task-Type Soft Prompts | Medium-High | Medium | +10% | +5% | Maybe (Phase 3)"
+
+  With current setup:
+  - ❌ Cannot test soft prompt adaptation for different task types
+  - ❌ Cannot leverage domain-specific learned features
+  - ✅ Can still test language-based generalization
+
+  Options
+
+  | Option                              | Pros                             | Cons                        | Effort |
+  |-------------------------------------|----------------------------------|-----------------------------|--------|
+  | Keep domain_id=0                    | Simple, matches current training | No soft prompt benefits     | None   |
+  | Re-train with task-category domains | Test soft prompts for plate/bin  | Requires data preprocessing | Medium |
+  | Re-train with arm-based domains     | Test left/right adaptation       | Limited differentiation     | Low    |
+
+  Recommendation
+
+  For current training (already running): Keep domain_id=0. The model will rely on language conditioning.
+
+  For future generalization testing, consider re-training with:
+
+  # Option A: Task category based domains
+  DOMAIN_MAPPING = {
+      "plate_tasks": 1,  # orange/bread/corn/banana -> plate
+      "bin_tasks": 2,    # icecream/ketchup/yogurt/tissue -> bin
+  }
+
+  # Option B: More granular - object type
+  DOMAIN_MAPPING = {
+      "orange": 1, "bread": 2, "corn": 3, "banana": 4,
+      "icecream": 5, "ketchup": 6, "yogurt": 7, "tissue": 8,
+  }
+
+  # Option C: Arm-based
+  DOMAIN_MAPPING = {
+      "left_arm": 1,
+      "right_arm": 2,
+  }
+
+  To implement (for future training):
+
+  1. Add domain_id column to dataset during data collection:
+  # In data collection script
+  if "plate" in task:
+      domain_id = 1
+  elif "bin" in task:
+      domain_id = 2
+
+  2. Or override in training script:
+  # train_xvla_bimanual.sh
+  CMD="${CMD} --policy.domain_feature_key=task_category"
+
+  Bottom Line: Current training will produce a working model with language-only task conditioning. For proper soft prompt testing per your Phase 3 proposal, you'll need to re-train with meaningful domain_id assignments after this training completes.
 
 ### inference
   python jdocs/scripts/bimanual/infer_xvla_bimanual.py \

@@ -139,6 +139,10 @@ else
 fi
 
 # Optimizer
+# X-VLA paper pretraining uses weight_decay=0.01, but for fine-tuning:
+#   - LeRobot XVLA/SmolVLA/OpenVLA all use weight_decay=0.0
+#   - Lower weight decay preserves pretrained weights better
+#   - Only increase if overfitting is observed
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-10.0}"
@@ -274,9 +278,16 @@ CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::Deprecati
     ${RESUME_FLAG}"
 
 # Camera name mapping for bimanual (3 cameras)
-# Maps: head->camera1, left_wrist->camera2, right_wrist->camera3
-# xVLA expects camera1, camera2, camera3 naming
-CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\",\"observation.images.right_wrist\":\"observation.images.camera3\"}"
+# Maps to XVLA expected names: image, image2, and we add a 3rd camera
+# xVLA base model expects: observation.images.image, observation.images.image2
+# For 3 cameras, we map: head->image, left_wrist->image2, right_wrist->image3
+CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.image\",\"observation.images.left_wrist\":\"observation.images.image2\",\"observation.images.right_wrist\":\"observation.images.image3\"}"
+
+# Override input_features to match our 3-camera setup (instead of 2 cameras + empty)
+CMD="${CMD} --policy.input_features={\"observation.images.image\":{\"type\":\"VISUAL\",\"shape\":[3,256,256]},\"observation.images.image2\":{\"type\":\"VISUAL\",\"shape\":[3,256,256]},\"observation.images.image3\":{\"type\":\"VISUAL\",\"shape\":[3,256,256]},\"observation.state\":{\"type\":\"STATE\",\"shape\":[12]}}"
+
+# Disable empty cameras since we have 3 real cameras
+CMD="${CMD} --policy.empty_cameras=0 --policy.num_image_views=3"
 
 # =============================================================================
 # Run Training
