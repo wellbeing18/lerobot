@@ -66,10 +66,14 @@ cd "${PROJECT_ROOT}"
 # =============================================================================
 
 # Dataset Configuration
-# Default to the combined left+right arm dataset for proof-of-concept bimanual training
-# Override DATASET_PATH for other datasets (e.g., handover, bimanual_pick)
-DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets_bimanuel/bimanual/combined_pick_and_place}"
-DATASET_NAME="${DATASET_NAME:-combined_pick_and_place}"
+# Default to multitasks dataset for multi-task bimanual training
+# This dataset has 12D actions (both arms recorded) with 16 tasks:
+#   - 8 plate tasks: left/right arm pick {orange,bread,corn,banana} -> plate
+#   - 8 bin tasks: left/right arm pick {ice cream,ketchup,yogurt,tissue} -> bin
+# Task format: "Use {arm} arm to pick up the {object} and place it {in/on} the {target}"
+# Override DATASET_PATH for other datasets (e.g., single-task datasets)
+DATASET_PATH="${DATASET_PATH:-${PROJECT_ROOT}/datasets_bimanuel/multitasks}"
+DATASET_NAME="${DATASET_NAME:-multitasks}"
 
 # Pretrained Model
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/xvla-base}"
@@ -141,7 +145,7 @@ GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-10.0}"
 
 # Scheduler (cosine decay with warmup)
 WARMUP_STEPS="${WARMUP_STEPS:-1000}"
-DECAY_STEPS="${DECAY_STEPS:-30000}"
+DECAY_STEPS="${DECAY_STEPS:-${MAX_STEPS}}"  # Match MAX_STEPS for proper LR decay
 DECAY_LR="${DECAY_LR:-2.5e-6}"
 
 # Checkpointing

@@ -85,7 +85,29 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitask
   # Left arm picks ketchup -> bin
   python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-      --task-key left_ketchup_bin
+      --task-key left_yogurt_bin 
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the ice cream and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the used tissue and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the tissue package and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the tissue package and place it in the bin"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the yogurt bottle and place it in the bin"
+
+
 
   Available task keys:
   | Plate Tasks        | Bin Tasks          |
@@ -99,12 +121,20 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitask
   | left_banana_plate  | left_tissue_bin    |
   | right_banana_plate | right_tissue_bin   |
 
+#### issues:
+- task name: garbage -> used tissue
+- overfit to bin or plate
+
 ## xvla
 
 
 ### train
 
-nohup env FREEZE_VISION=false bash jdocs/scripts/bimanual/train_xvla_bimanual.sh > outputs/xvla_bimanual_training.log 2>&1 &
+  nohup env FREEZE_VISION=false MAX_STEPS=80000 BATCH_SIZE=16 \
+    bash jdocs/scripts/bimanual/train_xvla_bimanual.sh \
+    > outputs/xvla_bimanual_training_multitasks.log 2>&1 &
+
+tail -f outputs/xvla_bimanual_training_multitasks.log
 
 ### inference
   python jdocs/scripts/bimanual/infer_xvla_bimanual.py \

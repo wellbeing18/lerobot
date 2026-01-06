@@ -93,10 +93,10 @@ multitask lerobot dataset collection
 
   Used tissue (2x20) DONE
 
-  <!-- 29. Use left arm to pick up the garbage and place it on the plate -->
-  30. Use left arm to pick up the garbage and place it in the bin
-  <!-- 31. Use right arm to pick up the garbage and place it on the plate -->
-  32. Use right arm to pick up the garbage and place it in the bin
+  <!-- 29. Use left arm to pick up the used tissue and place it on the plate -->
+  30. Use left arm to pick up the used tissue and place it in the bin
+  <!-- 31. Use right arm to pick up the used tissue and place it on the plate -->
+  32. Use right arm to pick up the used tissue and place it in the bin
 
 <!-- high level: leave to VLM -->
 Pick up the beverages and place it in the bin
