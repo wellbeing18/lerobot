@@ -52,6 +52,17 @@ nohup env FREEZE_VISION=false MAX_STEPS=40000 BATCH_SIZE=48 \
 
 tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitasks.log
 
+
+#### full finetuning
+  nohup env \
+      TRAIN_EXPERT_ONLY=false \
+      FREEZE_VISION=false \
+      BATCH_SIZE=4 \
+      MAX_STEPS=200000 \
+      LEARNING_RATE=5e-5 \
+      bash jdocs/scripts/bimanual/train_smolvla_bimanual.sh \
+      > logs/smolvla_full_finetune_200k.log 2>&1 &
+
 ### inference
 
 #### single task
@@ -84,22 +95,91 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitask
       --left --dry-run
 
 #### multi-tasks
+
+##### successful one(for demo)
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/success_smolvla_bimanual_20260103_multitask_visiononly/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the bread and place it in the bin"
+
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/success_smolvla_bimanual_20260103_multitask_visiononly/checkpoints/040000/pretrained_model  \
+      --task "Use right arm to pick up the bread and place it in the bin"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the bread and place it in the bin"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the bread and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the banana and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use right arm to pick up the yogurt bottle and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/success_smolvla_bimanual_20260103_multitask_visiononly/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the yogurt bottle and place it in the bin"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/success_smolvla_bimanual_20260103_multitask_visiononly/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the ketchup bottle and place it in the bin"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/success_smolvla_bimanual_20260103_multitask_visiononly/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the corn and place it on the plate"
+
+we are encounter some issues when we use/test smolvla model using cmd like:  ```python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/success_smolvla_bimanual_20260103_multitask_visiononly/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the ketchup bottle and place it in the bin"```: 
+
+case 1: log jdocs/logs/inference_smolvla_bimanual_20260118_115817.log
+symptom: when left arm put the yogurt bottle to the bin, it went back home, but later it reached out trying to pick up something where the bottle used to be but now there is nothing. it is hallucination
+note: there is another object banana on the right side of the table close to right arm
+
+case 2: jdocs/logs/inference_smolvla_bimanual_20260118_120130.log
+observation: after left arm put the yogurt bottle to the bin, it went back home, and stay still ongoing
+note: not like case 1, there is no other object on the table
+
+case 3: jdocs/logs/inference_smolvla_bimanual_20260118_120221.log
+observation: after left arm put the yogurt bottle to the bin, it went back home, and stay still ongoing
+note: there is no other object on the table, even there is a banana on the plate at the right side.
+
+so from these 3 cases, the empirical observation gave me the impression that: when there are other object(s) on the table, current smolvla model kinds of hallucinating to pick up thing at the place where object used to be(even the object left on table is not the object in the command, and not in the area it is trying to pickup).
+
+this is just one issue of many other different symptoms we experienced in different scenarios. there are several suspected areas: 1) the bias, the defects, the distribution of dataset we collected to do finetuning for the smolvla model: datasets_bimanuel/multitasks. 2) potential model's own defects like vision dominated the language(ie, from above case 1, give me the impression like vision dominates, even the command says clearly yogurt bottle, it is impacted by banana on the table, and generate hallucinated action to pick up where yogurt bottle used to be), or other issues we didn't figure out yet. 
+
+but what I want now is as experts in vla model fields, you need to step back to research and think how to scientifically and systematically identify the root cause, then propose solution to solve the issue, more importantly during the process, we can generate process and tools which can facilitate us to spot and improve other issues. my suggestion is to use scientific facts/experiments based investigation and research methods: 1) first collect traces of those cases which become the key data for investigation, ie, logs and images/videos 2) use first principle to dissect smolvla model to find the root cause based on scientific explanation, for example, to check/visualize cross-attention on the picture, impact of vision and language(the model we finetuned unfroze only vision encoder and action part, not the language, we tried another version with unfrozon all, but the resulting model performed really bad), the generated action diffusion distribution coverage distribution, or other methodology vla research fields use to inspect and investigate vla model's internal reasoning and decision and generation logic 3) also check the dataset we collected for finetuning, create tools to analyze the data distributions or other features, which can help explain or resonate with the step 2)'s identified issues, which can further help /direct us to (re)collect missing data with goal otherwise we are facing curse of dimension issue of data collection and black box issue which we don't know what data are missing, what data we need more, what data we need to fix(for example, if the analysis shows there are data scarcity in certain use case, which caused the vla model doesn't have enough demo distribution which explain the hallucination) or collect more variety data(if above analysis shows the lack of data variety for certain situation caused the unexpected behavior), you get the idea, we need to use scientific mindset to use tools/experiements, collected data, visualized data, facts etc to spot root cause which explain the issue we experienced. then based on that to propose solutions, if it is data issue, we do dataset fix, if it is model issue, we fix model issue. but all needs to based on logically or facts based proof.
+
+the research process can not be achieved in one shot, so you need to step back, design and plan a systematically process like: what data or logs or evidence to look into, what tools we need to build to generate more insightful evidence or prob deeper/embedded issues like what happened inside the smolvla model to produce hallucination for a situation, tools to scan and analyze dataset and model's internal we have then link the findings to the symptoms we spotted in the analysis. then from there we propose solutions proposals which supported by evidences or facts.
+
+this process is like academic or scientific research, which by iteself can later be turned into a research paper, like starting from the issue/symptom we facing, tools we built to help investigate, the evidences found to explain the issue(with some level of visualization is always a plus), then solutions proposed to solve the issue. then proved result to solve the issue. so follow this mindset or process to conduct your research plan. write your research plan into doc jdocs/bimanual/bin first, before start to implement and conduct the research. I can also help to run some experiements, collect data or evidence to iteratively promote the research process.
+
+
+
+
+##### others
   Final checkpoint (40K steps):
   python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model
 
   With specific task (use --task-key):
-  # Left arm picks orange -> plate
+  <!-- Left arm picks orange -> plate -->
   python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
       --task-key left_orange_plate
 
-  # Right arm picks banana -> plate  
+  <!-- Right arm picks banana -> plate   -->
   python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
       --task-key right_corn_plate 
 
-  # Left arm picks ketchup -> bin
+  <!-- Left arm picks ketchup -> bin -->
   python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
       --task-key left_yogurt_bin 
@@ -142,6 +222,16 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitask
 - task name: garbage -> used tissue
 - overfit to bin or plate
 
+### full finetuning
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260107_072120/checkpoints/050000/pretrained_model \
+      --task "Use right arm to pick up the ice cream and place it on the plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260107_072120/checkpoints/020000/pretrained_model \
+      --task "Use right arm to pick up the bread and place it on the plate"
+
 ## xvla
 
 
@@ -153,6 +243,14 @@ tail -f /home/jrobot/project/lerobot/outputs/smolvla_bimanual_training_multitask
     > outputs/xvla_bimanual_training_multitasks.log 2>&1 &
 
 tail -f outputs/xvla_bimanual_training_multitasks.log
+
+### inference
+
+  python jdocs/scripts/bimanual/infer_xvla_bimanual.py \
+      -c outputs/xvla_bimanual_20260105_234319/checkpoints/last/pretrained_model \
+      --task "Use left arm to pick up the bread and place it on the plate"
+
+### issues
 
  Current Situation
 
@@ -226,10 +324,7 @@ tail -f outputs/xvla_bimanual_training_multitasks.log
 
   Bottom Line: Current training will produce a working model with language-only task conditioning. For proper soft prompt testing per your Phase 3 proposal, you'll need to re-train with meaningful domain_id assignments after this training completes.
 
-### inference
-  python jdocs/scripts/bimanual/infer_xvla_bimanual.py \
-      -c outputs/xvla_bimanual_TIMESTAMP/checkpoints/020000/pretrained_model \
-      --left --duration 60
+
 
 
 ## pi0.5

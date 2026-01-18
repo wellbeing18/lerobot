@@ -1,5 +1,34 @@
 # XLeRobot Hardware Configuration System
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Key Files](#key-files)
+- [Data Flow: Training vs Inference](#data-flow-training-vs-inference)
+- [Critical Question: Does Port Change Affect Trained Model?](#critical-question-does-port-change-affect-trained-model)
+  - [Why?](#why)
+  - [What IS Affected?](#what-is-affected)
+  - [The Real Problem: Inference with Swapped Ports](#the-real-problem-inference-with-swapped-ports)
+- [Calibration File Structure](#calibration-file-structure)
+  - [Important: No bi_so101_follower Calibration Directory](#important-no-bi_so101_follower-calibration-directory)
+- [Central Config File Format](#central-config-file-format)
+- [Usage: When Hardware Ports Change](#usage-when-hardware-ports-change)
+  - [Option A: Interactive Port Identification Script](#option-a-interactive-port-identification-script)
+  - [Option B: Using Claude Code](#option-b-using-claude-code)
+  - [Option C: Manual Config Update](#option-c-manual-config-update)
+  - [Option D: Hardware Scanner (Less Reliable)](#option-d-hardware-scanner-less-reliable)
+  - [Verification](#verification)
+  - [All Scripts Automatically Use Updated Config](#all-scripts-automatically-use-updated-config)
+- [How Scripts Load Config](#how-scripts-load-config)
+- [Troubleshooting](#troubleshooting)
+  - [Symptom: Robot arms move unexpectedly during inference](#symptom-robot-arms-move-unexpectedly-during-inference)
+  - [Symptom: "Calibration not found" error](#symptom-calibration-not-found-error)
+- [Summary](#summary)
+- [Quick Reference](#quick-reference)
+  - [Key Files](#key-files-1)
+  - [Quick Fix for Swapped Ports](#quick-fix-for-swapped-ports)
+
 ## Overview
 
 This document explains the centralized hardware configuration system for XLeRobot bimanual setups. The system ensures consistent hardware settings across all scripts (data collection, training, inference) and provides tools to handle hardware changes (USB port reassignments after reboot/unplug).
@@ -170,8 +199,9 @@ cameras:
 
 ## Usage: When Hardware Ports Change
 
-### Option A: Interactive Port Identification Script
+### Option A(Best): Interactive Port Identification Script
 
+#### step 1
 The most reliable method - physically wiggles each arm to identify ports:
 
 ```bash
@@ -191,7 +221,7 @@ This will:
 - `rl` = Right Leader
 - `n` = None/didn't move
 
-### Option B: Using Claude Code
+#### step 2: Using Claude Code Updates jdocs/configs/hardware/xlerobot_bimanual.yaml 
 
 If you're working with Claude Code, simply tell Claude what happened during the identification:
 

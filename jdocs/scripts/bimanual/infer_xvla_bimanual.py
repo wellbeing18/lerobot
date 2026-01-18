@@ -576,7 +576,7 @@ def log_diagnostic_info(
             obs_state = preprocessor_output.get("observation.state")
             if obs_state is not None:
                 if isinstance(obs_state, torch.Tensor):
-                    norm_state = obs_state.squeeze().cpu().numpy()
+                    norm_state = obs_state.squeeze().float().cpu().numpy()
                     logger.info("\n[Normalized State (what policy sees)]")
                     logger.info(f"  Left arm:  [{', '.join([f'{v:+.3f}' for v in norm_state[:6]])}]")
                     logger.info(f"  Right arm: [{', '.join([f'{v:+.3f}' for v in norm_state[6:12]])}]")
@@ -694,6 +694,65 @@ def run_inference_loop(
 
     policy.reset()
 
+    # =========================================================================
+    # DIAGNOSTIC: Test if model responds to different task prompts
+    # =========================================================================
+    if DIAGNOSTIC_MODE:
+        logger.info("\n" + "=" * 70)
+        logger.info("DIAGNOSTIC: Testing model responsiveness to different tasks")
+        logger.info("=" * 70)
+
+        # Capture single frame for testing
+        test_images = cameras.capture()
+        test_state = robot.get_state()
+
+        test_tasks = [
+            task,  # The actual task
+            "Use left arm to pick up the orange and place it on the plate",
+            "Use right arm to pick up the banana and place it in the bin",
+            "Do nothing and stay still",
+        ]
+
+        test_outputs = []
+        for i, test_task in enumerate(test_tasks):
+            policy.reset()  # Reset action queue
+            test_obs = format_observation(test_images, test_state, test_task, domain_id, device)
+            test_preprocessed = preprocessor(test_obs)
+
+            with torch.inference_mode():
+                test_action = policy.select_action(test_preprocessed)
+
+            if isinstance(test_action, torch.Tensor):
+                test_action_np = test_action.squeeze(0).float().cpu().numpy()
+            else:
+                test_action_np = test_action
+
+            test_outputs.append(test_action_np)
+            logger.info(f"\n  Task {i+1}: \"{test_task[:50]}...\"")
+            logger.info(f"    Raw output: [{', '.join([f'{v:+.3f}' for v in test_action_np[:6]])}] (L arm)")
+            logger.info(f"                [{', '.join([f'{v:+.3f}' for v in test_action_np[6:12]])}] (R arm)")
+
+        # Check if outputs differ significantly
+        outputs_arr = np.array(test_outputs)
+        output_std = outputs_arr.std(axis=0)
+        logger.info(f"\n  Output variation (std across tasks):")
+        logger.info(f"    Left arm:  [{', '.join([f'{v:.4f}' for v in output_std[:6]])}]")
+        logger.info(f"    Right arm: [{', '.join([f'{v:.4f}' for v in output_std[6:12]])}]")
+
+        max_std = output_std[:12].max()
+        if max_std < 0.01:
+            logger.warning("  >>> WARNING: Model outputs nearly IDENTICAL for different tasks! <<<")
+            logger.warning("  >>> Model may not be properly conditioned on language input <<<")
+        elif max_std < 0.1:
+            logger.warning("  >>> WARNING: Model outputs have very LOW variation across tasks <<<")
+        else:
+            logger.info(f"  >>> Model shows variation (max std={max_std:.4f}), language conditioning may be working <<<")
+
+        logger.info("=" * 70 + "\n")
+
+        # Reset for actual inference
+        policy.reset()
+
     while running and (time.time() - start_time) < max_duration:
         loop_start = time.time()
 
@@ -702,7 +761,36 @@ def run_inference_loop(
         state_history.append(state.copy())
 
         observation = format_observation(images, state, task, domain_id, device)
+
+        # Log observation details for first step
+        if DIAGNOSTIC_MODE and step_count == 0:
+            logger.info("\n[Step 0] OBSERVATION (before preprocessor):")
+            for k, v in observation.items():
+                if isinstance(v, torch.Tensor):
+                    logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}, device={v.device}")
+                    if 'state' in k:
+                        logger.info(f"      values: [{', '.join([f'{x:.1f}' for x in v.squeeze().tolist()])}]")
+                    elif 'images' in k:
+                        logger.info(f"      range: [{v.min().item():.3f}, {v.max().item():.3f}]")
+                else:
+                    logger.info(f"  {k}: {v}")
+
         preprocessed_obs = preprocessor(observation)
+
+        # Log preprocessed observation for first step
+        if DIAGNOSTIC_MODE and step_count == 0:
+            logger.info("\n[Step 0] PREPROCESSED OBSERVATION (after preprocessor):")
+            for k, v in preprocessed_obs.items():
+                if isinstance(v, torch.Tensor):
+                    logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+                    if 'state' in k:
+                        logger.info(f"      values: [{', '.join([f'{x:.3f}' for x in v.squeeze().float().cpu().tolist()[:12]])}]")
+                    elif 'images' in k:
+                        logger.info(f"      range: [{v.min().item():.3f}, {v.max().item():.3f}]")
+                elif isinstance(v, dict):
+                    logger.info(f"  {k}: <dict with {len(v)} entries>")
+                else:
+                    logger.info(f"  {k}: {type(v).__name__}")
 
         inf_start = time.time()
         with torch.inference_mode():
@@ -712,26 +800,45 @@ def run_inference_loop(
 
         # Capture raw policy output for diagnostics
         raw_policy_action = None
-        if DIAGNOSTIC_MODE and step_count == 0:
+        if DIAGNOSTIC_MODE and step_count < 5:  # Log first 5 steps
             if isinstance(raw_action, torch.Tensor):
-                raw_policy_action = raw_action.squeeze(0).cpu().numpy()
+                raw_policy_action = raw_action.squeeze(0).float().cpu().numpy()
             elif isinstance(raw_action, dict) and "action" in raw_action:
                 act = raw_action["action"]
                 if isinstance(act, torch.Tensor):
-                    raw_policy_action = act.squeeze(0).cpu().numpy()
+                    raw_policy_action = act.squeeze(0).float().cpu().numpy()
+
+            # Log detailed raw output info
+            if raw_policy_action is not None:
+                logger.info(f"\n[Step {step_count}] RAW MODEL OUTPUT (before postprocessor):")
+                logger.info(f"  Shape: {raw_policy_action.shape}")
+                logger.info(f"  Raw values (first 12): [{', '.join([f'{v:+.4f}' for v in raw_policy_action[:12]])}]")
+                logger.info(f"  Min: {raw_policy_action[:12].min():.4f}, Max: {raw_policy_action[:12].max():.4f}")
+                logger.info(f"  If normalized ~[-1,1]: unnorm = raw * std + mean")
 
         action = postprocessor(raw_action)
 
         if isinstance(action, torch.Tensor):
-            action = action.squeeze(0).cpu().numpy()
+            action = action.squeeze(0).float().cpu().numpy()
         elif isinstance(action, dict):
             action = action.get("action", action)
             if isinstance(action, torch.Tensor):
-                action = action.squeeze(0).cpu().numpy()
+                action = action.squeeze(0).float().cpu().numpy()
 
         # xVLA with so101_bimanual outputs 20D, trim to 12D for robot
         if len(action) > TOTAL_DIM:
             action = action[:TOTAL_DIM]
+
+        # Log postprocessed action for first few steps
+        if DIAGNOSTIC_MODE and step_count < 5:
+            logger.info(f"\n[Step {step_count}] POSTPROCESSED ACTION (after unnormalization):")
+            logger.info(f"  Action values: [{', '.join([f'{v:+.1f}' for v in action])}]")
+            logger.info(f"  Current state: [{', '.join([f'{v:+.1f}' for v in state])}]")
+            delta = action - state
+            logger.info(f"  Delta (action - state): [{', '.join([f'{v:+.2f}' for v in delta])}]")
+            logger.info(f"  Max delta magnitude: {np.abs(delta).max():.2f} degrees")
+            if np.abs(delta).max() < 1.0:
+                logger.warning("  >>> WARNING: Very small action deltas! Model may not be producing meaningful actions <<<")
 
         action_history.append(action.copy())
 
@@ -1042,6 +1149,99 @@ def main():
         )
         logger.info("  Preprocessor and postprocessor created")
         logger.info(f"  Domain ID: {args.domain_id} (used for soft prompt selection)")
+
+        # =====================================================================
+        # DIAGNOSTIC: Log complete policy configuration
+        # =====================================================================
+        logger.info("\n" + "=" * 70)
+        logger.info("DIAGNOSTIC: POLICY CONFIGURATION")
+        logger.info("=" * 70)
+        logger.info(f"  Policy type: {policy.config.type}")
+        logger.info(f"  Action mode: {policy.config.action_mode}")
+        logger.info(f"  Chunk size: {policy.config.chunk_size}")
+        logger.info(f"  N action steps: {policy.config.n_action_steps}")
+        logger.info(f"  Num denoising steps: {policy.config.num_denoising_steps}")
+        logger.info(f"  dtype: {policy.config.dtype}")
+        logger.info(f"  Max action dim: {policy.config.max_action_dim}")
+        logger.info(f"  Use proprio: {policy.config.use_proprio}")
+
+        # Log normalization mapping
+        logger.info("\n[Normalization Mapping]")
+        for feature_type, norm_mode in policy.config.normalization_mapping.items():
+            logger.info(f"  {feature_type}: {norm_mode}")
+
+        # Log input/output features
+        logger.info("\n[Input Features]")
+        for k, v in policy.config.input_features.items():
+            logger.info(f"  {k}: {v}")
+        logger.info("\n[Output Features]")
+        for k, v in policy.config.output_features.items():
+            logger.info(f"  {k}: {v}")
+
+        # Log preprocessor steps
+        logger.info("\n[Preprocessor Steps]")
+        for i, step in enumerate(preprocessor.steps):
+            step_name = step.__class__.__name__
+            logger.info(f"  {i}: {step_name}")
+            # Log step config if available
+            if hasattr(step, 'get_config'):
+                cfg = step.get_config()
+                if cfg:
+                    for k, v in cfg.items():
+                        if k == 'stats' and v:
+                            logger.info(f"      {k}: <loaded - {len(v)} entries>")
+                        elif k == 'norm_map':
+                            logger.info(f"      {k}: {v}")
+                        elif k not in ['features']:  # Skip large entries
+                            logger.info(f"      {k}: {v}")
+
+        # Log postprocessor steps
+        logger.info("\n[Postprocessor Steps]")
+        for i, step in enumerate(postprocessor.steps):
+            step_name = step.__class__.__name__
+            logger.info(f"  {i}: {step_name}")
+            if hasattr(step, 'get_config'):
+                cfg = step.get_config()
+                if cfg:
+                    for k, v in cfg.items():
+                        if k == 'stats' and v:
+                            logger.info(f"      {k}: <loaded - {len(v)} entries>")
+                        elif k == 'norm_map':
+                            logger.info(f"      {k}: {v}")
+                        elif k not in ['features']:
+                            logger.info(f"      {k}: {v}")
+
+        # Log action stats from checkpoint (crucial for unnormalization)
+        logger.info("\n[Action Stats from Checkpoint (for MEAN_STD unnormalization)]")
+        # Access stats from the unnormalizer step
+        unnorm_step = postprocessor.steps[0]  # First step is UnnormalizerProcessorStep
+        if hasattr(unnorm_step, 'stats') and unnorm_step.stats:
+            action_stats = unnorm_step.stats
+            if 'action.mean' in action_stats:
+                mean = action_stats['action.mean']
+                std = action_stats['action.std']
+                logger.info(f"  action.mean: {mean.tolist()[:12]}")
+                logger.info(f"  action.std:  {std.tolist()[:12]}")
+                logger.info("\n  Interpretation: unnormalized = (raw_output * std) + mean")
+                logger.info("  Joint order: [L_pan, L_lift, L_elbow, L_wflex, L_wroll, L_grip,")
+                logger.info("                R_pan, R_lift, R_elbow, R_wflex, R_wroll, R_grip]")
+            else:
+                logger.warning("  WARNING: action.mean not found in unnormalizer stats!")
+                logger.warning(f"  Available keys: {list(action_stats.keys())[:10]}...")
+        else:
+            logger.warning("  WARNING: No stats found in unnormalizer step!")
+            logger.warning(f"  Step attributes: {dir(unnorm_step)}")
+
+        # Log dataset stats for comparison
+        logger.info("\n[Dataset Stats (from metadata)]")
+        if 'action' in dataset_metadata.stats:
+            ds_action_stats = dataset_metadata.stats['action']
+            logger.info(f"  action.mean: {ds_action_stats.get('mean', 'N/A')}")
+            logger.info(f"  action.std:  {ds_action_stats.get('std', 'N/A')}")
+        else:
+            logger.warning("  WARNING: No action stats in dataset metadata!")
+
+        logger.info("=" * 70 + "\n")
 
         logger.info("\nInitializing bimanual hardware...")
         cameras = CameraManager(hw_config)
