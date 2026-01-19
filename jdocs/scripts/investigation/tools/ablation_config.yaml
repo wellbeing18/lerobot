@@ -1,0 +1,25 @@
+# Ablation Experiment Configuration
+# Use with: python run_ablation.py --config ablation_config.yaml
+
+name: smolvla_hallucination_ablation_suite
+
+# Experiments to run in order
+experiments:
+  # Baseline
+  - baseline_no_modification
+
+  # Language ablations - different completion phrases
+  - language_completion_hold
+  - language_completion_stay_still
+
+  # Language ablations - different trigger timings
+  - language_completion_early
+  - language_completion_late
+
+  # Language ablations - different trigger methods
+  - language_completion_gripper
+  - language_completion_variance
+
+  # Temporal ablations
+  - temporal_short_duration
+  - temporal_long_duration

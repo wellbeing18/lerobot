@@ -62,7 +62,7 @@ import yaml
 # KEY CONFIGURATION
 # ============================================================================
 # Model
-DEFAULT_CHECKPOINT = "outputs/smolvla_bimanual/checkpoints/020000/pretrained_model"
+DEFAULT_CHECKPOINT = "outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Task description (language prompt for SmolVLA)
@@ -623,6 +623,43 @@ def format_observation(
     return observation
 
 
+# ============================================================================
+# DYNAMIC TASK MODIFICATION (for language ablation experiments)
+# ============================================================================
+
+def detect_task_completion(
+    step: int,
+    state: np.ndarray,
+    action_history: list,
+    trigger_type: str = "step_count",
+    trigger_step: int = 180,
+) -> bool:
+    """
+    Detect if task completion should be triggered.
+
+    NOTE: VLA models like SmolVLA do NOT have built-in completion detection.
+    Automatic heuristics (gripper state, action variance) are unreliable and
+    can cause false positives that ruin normal execution. For robust learned
+    completion detection, see SeqVLA paper which adds a completion head.
+
+    For research purposes, we only support manual step count specification.
+    The researcher should observe when tasks typically complete and set
+    --completion-step accordingly.
+
+    Args:
+        step: Current inference step
+        state: Current robot state (12D) - unused, kept for API compatibility
+        action_history: History of actions - unused, kept for API compatibility
+        trigger_type: Only "step_count" supported (others removed as unreliable)
+        trigger_step: Step threshold for step_count trigger
+
+    Returns:
+        True if completion detected (step >= trigger_step)
+    """
+    # Only step_count is supported - other methods were removed as unreliable
+    return step >= trigger_step
+
+
 def run_inference_loop(
     policy,
     preprocessor,
@@ -639,8 +676,18 @@ def run_inference_loop(
     clip_actions: bool = False,
     max_delta: float = MAX_ACTION_DELTA,
     dataset_stats: dict = None,
+    # Dynamic task parameters (for language ablation experiments)
+    dynamic_task: bool = False,
+    completion_phrase: str = "Task complete. Hold position.",
+    completion_step: int = 180,
 ):
-    """Main bimanual inference loop."""
+    """Main bimanual inference loop.
+
+    Args:
+        dynamic_task: Enable dynamic task modification (for hallucination research)
+        completion_phrase: Task description to use after completion detected
+        completion_step: Step number to trigger completion (manual specification required)
+    """
     global running
 
     logger.info(f"\nStarting BIMANUAL inference loop (max {max_duration}s)...")
@@ -653,6 +700,10 @@ def run_inference_loop(
         logger.info(">>> RIGHT ARM FROZEN - holding current position <<<")
     if clip_actions:
         logger.info(f">>> ACTION CLIPPING ENABLED - max delta: {max_delta}° per step <<<")
+    if dynamic_task:
+        logger.info(f">>> DYNAMIC TASK ENABLED <<<")
+        logger.info(f"    Trigger at step: {completion_step}")
+        logger.info(f"    Completion phrase: {completion_phrase}")
     logger.info("")
     logger.info("WARNING: SmolVLA has NO native bimanual support!")
     logger.info("         Actions are treated as flat 12D vector.")
@@ -672,6 +723,11 @@ def run_inference_loop(
     action_history = []
     state_history = []
 
+    # Dynamic task state
+    original_task = task
+    current_task = task
+    completion_triggered = False
+
     policy.reset()
 
     while running and (time.time() - start_time) < max_duration:
@@ -681,7 +737,24 @@ def run_inference_loop(
         state = robot.get_state()
         state_history.append(state.copy())
 
-        observation = format_observation(images, state, task, device)
+        # Dynamic task modification check (step_count trigger only)
+        if dynamic_task and not completion_triggered:
+            if detect_task_completion(
+                step=step_count,
+                state=state,
+                action_history=action_history,
+                trigger_step=completion_step,
+            ):
+                completion_triggered = True
+                current_task = completion_phrase
+                logger.info(f"\n{'='*50}")
+                logger.info(f"TASK COMPLETION DETECTED at step {step_count}")
+                logger.info(f"Switching task to: {current_task}")
+                logger.info(f"{'='*50}\n")
+                # Reset policy to recompute KV cache with new task
+                policy.reset()
+
+        observation = format_observation(images, state, current_task, device)
         preprocessed_obs = preprocessor(observation)
 
         inf_start = time.time()
@@ -923,6 +996,27 @@ def main():
         action="store_true",
         help="Disable diagnostic logging"
     )
+    # Dynamic task modification (for language ablation experiments)
+    # NOTE: Automatic completion detection is unreliable. VLA models do not have
+    # built-in completion detection. Use manual step count based on observation.
+    # For robust learned completion detection, see: SeqVLA paper.
+    parser.add_argument(
+        "--dynamic-task",
+        action="store_true",
+        help="Enable dynamic task modification during inference (for hallucination research)"
+    )
+    parser.add_argument(
+        "--completion-phrase",
+        type=str,
+        default="Task complete. Hold position.",
+        help="Phrase to use after task completion (requires --dynamic-task)"
+    )
+    parser.add_argument(
+        "--completion-step",
+        type=int,
+        default=180,
+        help="Step number to trigger completion phrase (requires --dynamic-task)"
+    )
     args = parser.parse_args()
 
     # Set diagnostic mode
@@ -1057,6 +1151,10 @@ def main():
             clip_actions=args.clip_actions,
             max_delta=args.max_delta,
             dataset_stats=dataset_metadata.stats,
+            # Dynamic task parameters
+            dynamic_task=args.dynamic_task,
+            completion_phrase=args.completion_phrase,
+            completion_step=args.completion_step,
         )
 
     except KeyboardInterrupt:
