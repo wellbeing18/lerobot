@@ -957,3 +957,310 @@ python denoising_analysis.py \
 **VLM Hallucination**:
 - [VADE: Visual Attention Guided Hallucination Detection](https://aclanthology.org/2025.findings-acl.773.pdf)
 - [VIB-Probe: Hallucination-Sensitive Head Detection](https://arxiv.org/html/2601.05547v1)
+
+---
+
+## 9. Phase 2: Mechanistic Understanding Investigation
+
+### 9.1 Critical Re-evaluation of Previous Conclusions
+
+**Previous conclusions that need revision:**
+
+| Previous Finding | Problem | Revised Understanding |
+|------------------|---------|----------------------|
+| H3: "Training data lacks idle examples" | **Doesn't explain why 2 normal cases DO stay still** | Model CAN output idle actions; something specific triggers hallucination |
+| H1 Rejection: "Visual distractor not the cause" | Cross-attention to banana is low, but distractor still correlates with hallucination | Distractor may affect processing differently than direct attention |
+
+**The fundamental question remains unanswered:**
+- In ALL three cases, the task completes successfully (bottle placed in bin)
+- In 2 cases, arm stays still (correct behavior)
+- In 1 case, arm reaches back (hallucination)
+- **What is mechanistically different?**
+
+### 9.2 VLA Mechanism: Complete Flow Diagram
+
+Based on codebase analysis (`modeling_smolvla.py`, `smolvlm_with_expert.py`):
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         SmolVLA COMPLETE INFERENCE FLOW                          │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+INPUT STAGE (Per Chunk):
+═══════════════════════════════════════════════════════════════════════════════════
+
+    Raw Images              Task Text                Robot State
+    (B×3×480×640)          "pick up bottle"         (B×12 joints)
+         │                      │                        │
+         ▼                      ▼                        ▼
+    ┌─────────┐           ┌──────────┐            ┌──────────┐
+    │ SigLIP  │           │Tokenizer │            │  Linear  │
+    │ Vision  │           │ (48 tok) │            │  Project │
+    │ Encoder │           │          │            │  (→768d) │
+    └────┬────┘           └────┬─────┘            └────┬─────┘
+         │                     │                       │
+         ▼                     ▼                       ▼
+    729 patches            48 tokens               1 token
+    (B, 729, 768)         (B, 48, 768)           (B, 1, 768)
+         │                     │                       │
+         └──────────┬──────────┴───────────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────────────┐
+         │      PREFIX ASSEMBLY         │
+         │  [img_special + patches +   │
+         │   language + state]         │
+         │  Total: ~778 tokens         │
+         └──────────────┬──────────────┘
+                        │
+                        ▼
+         ┌─────────────────────────────┐
+         │        KV CACHE             │  ← COMPUTED ONCE PER 50-STEP CHUNK
+         │  key_states, value_states   │  ← FROZEN FOR ALL 10 DENOISING STEPS
+         │  Contains scene+task context│
+         └──────────────┬──────────────┘
+                        │
+                        │  (Reused for all 10 denoising steps)
+                        │
+════════════════════════╧═══════════════════════════════════════════════════════════
+
+DENOISING LOOP (10 iterations per chunk):
+═══════════════════════════════════════════════════════════════════════════════════
+
+    x_0 = N(0,1)  ← Start with random noise (B, 50, 32)
+         │
+    ┌────┴────────────────────────────────────────────────────────────────────────┐
+    │  FOR step = 0 to 9:                                                         │
+    │                                                                              │
+    │    time = 1.0 - step * 0.1   (1.0 → 0.1)                                   │
+    │         │                                                                    │
+    │         ▼                                                                    │
+    │    ┌─────────────────────────────────┐                                      │
+    │    │  SUFFIX EMBEDDING               │                                      │
+    │    │  action_emb = project(x_t)     │                                      │
+    │    │  time_emb = sinusoidal(time)   │                                      │
+    │    │  suffix = MLP(concat(action,   │                                      │
+    │    │                     time))     │                                      │
+    │    └──────────────┬──────────────────┘                                      │
+    │                   │                                                          │
+    │                   ▼                                                          │
+    │    ┌─────────────────────────────────────────────────────────────┐          │
+    │    │              ACTION EXPERT CROSS-ATTENTION                   │          │
+    │    │                                                              │          │
+    │    │  Q = action_expert.q_proj(suffix)   ← Action tokens query   │          │
+    │    │  K = kv_cache.key_states            ← From prefix (frozen)  │          │
+    │    │  V = kv_cache.value_states          ← From prefix (frozen)  │          │
+    │    │                                                              │          │
+    │    │  attention = softmax(Q·K^T / √d)                            │          │
+    │    │  output = attention · V                                      │          │
+    │    │                                                              │          │
+    │    │  ┌──────────────────────────────────────────────────────┐   │          │
+    │    │  │  THIS IS THE DECISION POINT:                         │   │          │
+    │    │  │  - Which image patches get high attention?           │   │          │
+    │    │  │  - Which language tokens influence actions?          │   │          │
+    │    │  │  - Does the model "see" task is complete?            │   │          │
+    │    │  └──────────────────────────────────────────────────────┘   │          │
+    │    └──────────────┬──────────────────────────────────────────────┘          │
+    │                   │                                                          │
+    │                   ▼                                                          │
+    │    ┌─────────────────────────────────┐                                      │
+    │    │  VELOCITY PREDICTION            │                                      │
+    │    │  v_t = action_out_proj(output) │                                      │
+    │    │  (B, 50, 32)                    │                                      │
+    │    └──────────────┬──────────────────┘                                      │
+    │                   │                                                          │
+    │                   ▼                                                          │
+    │    ┌─────────────────────────────────┐                                      │
+    │    │  EULER UPDATE                   │                                      │
+    │    │  x_{t+1} = x_t + dt * v_t       │                                      │
+    │    │  (dt = -0.1)                    │                                      │
+    │    └──────────────┬──────────────────┘                                      │
+    │                   │                                                          │
+    │                   ▼                                                          │
+    │    x_t = x_{t+1}  (updated for next iteration)                              │
+    │                                                                              │
+    └─────────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+    x_final (B, 50, 32) ← Final action trajectory for next 50 steps
+```
+
+### 9.3 Key Insight: Where "Stay Still" vs "Move" is Decided
+
+**The critical decision happens in CROSS-ATTENTION:**
+
+For the model to output "stay still" (near-zero actions):
+1. **Vision must encode "task complete"** - No target object in expected location
+2. **Language context must not trigger movement** - "pick up" should not dominate
+3. **Velocity field must predict near-zero** - v_t ≈ 0 at all denoising steps
+
+**Questions to answer:**
+- At step 200+ (post-task completion), what does KV cache contain?
+- What image patches receive high cross-attention?
+- How does the presence of banana change these patterns?
+
+### 9.4 Revised Hypotheses
+
+| ID | Hypothesis | Mechanism | Test Method |
+|----|------------|-----------|-------------|
+| **H4** | **KV Cache State Encoding** | KV cache encodes robot's earlier position (with bottle), causing "replay" | Compare KV cache contents at step 200 between cases |
+| **H5** | **Cross-Attention to Scene Context** | Banana presence changes global scene representation (not direct attention to banana) | PCA/t-SNE of prefix embeddings |
+| **H6** | **Denoising Trajectory Divergence** | Same inputs produce different trajectories due to velocity field instability | Compare denoising with same noise seed |
+| **H7** | **Language Token Persistence** | "pick up" tokens retain high attention weight after task completion | Per-token attention analysis |
+| **H8** | **Chunk Boundary Corruption** | Error introduced at chunk transition (step 150, 200, 250) amplifies | Analyze chunk encoder output differences |
+
+### 9.5 Experiments to Run
+
+#### Experiment 1: Normal Behavior Characterization
+
+**Goal**: Document exactly how the model produces "stay still" in normal cases
+
+```bash
+python characterize_normal_behavior.py \
+    --case-dir logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
+    --output-dir logs/yogurt_banana_leftarm/normal_mechanism_analysis \
+    --capture-kv-cache \
+    --capture-denoising
+```
+
+**Metrics to collect**:
+- Step at which action delta drops below 3.0 (transition to idle)
+- KV cache statistics at transition point
+- Denoising velocity magnitude over time
+- Cross-attention distribution (image vs language vs state)
+
+#### Experiment 2: Divergence Point Analysis
+
+**Goal**: Find exactly WHERE in the pipeline hallucination diverges
+
+```bash
+python divergence_analysis.py \
+    --hallucination-case logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --normal-case logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
+    --compare-steps 150,200,210,250,300 \
+    --output-dir logs/yogurt_banana_leftarm/divergence_analysis
+```
+
+**Comparison metrics**:
+1. Vision features (SigLIP output): Cosine similarity
+2. Prefix embeddings: L2 distance per token position
+3. KV cache: Key/value state distances
+4. Action output: Joint-by-joint comparison
+
+#### Experiment 3: KV Cache Ablation
+
+**Goal**: Test if forcing KV cache reset eliminates hallucination
+
+```bash
+python kv_cache_ablation.py \
+    --scene hallucination \
+    --reset-at-step 200 \
+    --compare-with-baseline \
+    --output-dir logs/yogurt_banana_leftarm/kv_ablation
+```
+
+**Success criterion**: If reset eliminates hallucination, KV cache staleness is confirmed as cause
+
+#### Experiment 4: Denoising Trajectory Comparison
+
+**Goal**: Find which denoising step introduces hallucination
+
+```bash
+python compare_denoising_trajectories.py \
+    --hallucination-case logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --normal-case logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
+    --inference-step 250 \
+    --use-same-noise-seed \
+    --output-dir logs/yogurt_banana_leftarm/denoising_comparison
+```
+
+**Expected visualization**:
+```
+Denoising Trajectory Comparison (Step 250)
+     ▲
+ 15  │                              ╱ Hallucination
+     │                           ╱
+ 10  │                        ╱
+     │              ╭────────╯
+  5  │         ╭────╯
+     │      ╭──╯
+  0  │──────╯  Normal (stays near zero)
+     └─────┬──┬──┬──┬──┬──┬──┬──┬──┬──►
+           0  1  2  3  4  5  6  7  8  9
+                    Denoising Step
+```
+
+#### Experiment 5: Language Token Attention
+
+**Goal**: Check if "pick up" tokens retain attention after task completion
+
+```bash
+python analyze_language_attention.py \
+    --case-dir logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --steps 100,200,250,300 \
+    --output-dir logs/yogurt_banana_leftarm/language_attention
+```
+
+### 9.6 Tools to Build
+
+| Priority | Tool | Purpose | Key Functions |
+|----------|------|---------|---------------|
+| HIGH | `characterize_normal_behavior.py` | Document normal "stay still" mechanism | `extract_transition_point()`, `analyze_idle_generation()` |
+| HIGH | `divergence_analysis.py` | Compare hallucination vs normal at each pipeline stage | `compare_vision_features()`, `compare_kv_cache()`, `compare_actions()` |
+| HIGH | `kv_cache_analysis.py` | Extract and analyze KV cache contents | `extract_kv_cache()`, `compute_token_distances()`, `visualize_kv_evolution()` |
+| MEDIUM | `kv_cache_ablation.py` | Test KV cache reset intervention | `reset_kv_cache_at_step()`, `compare_with_baseline()` |
+| MEDIUM | `compare_denoising_trajectories.py` | Compare denoising with controlled noise | `set_noise_seed()`, `compare_velocity_fields()`, `plot_trajectory_divergence()` |
+| MEDIUM | `analyze_language_attention.py` | Per-token language attention over time | `extract_language_attention()`, `plot_token_heatmap()` |
+
+### 9.7 Success Criteria
+
+| Criterion | Measurement | Target |
+|-----------|-------------|--------|
+| **Identify divergence stage** | Which probe shows largest difference | Clear identification with >3σ separation |
+| **Quantify mechanism** | Metrics at identified stage | Reproducible across 5+ runs |
+| **Causal verification** | Ablation eliminates hallucination | >80% reduction in hallucination rate |
+| **Explain normal behavior** | Document why normal cases stay still | Complete mechanism diagram |
+
+### 9.8 Visualization Dashboard
+
+Create side-by-side comparison at key steps:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 HALLUCINATION vs NORMAL - Step 250                          │
+├─────────────────────────────────┬───────────────────────────────────────────┤
+│        HALLUCINATION            │              NORMAL                        │
+├─────────────────────────────────┼───────────────────────────────────────────┤
+│  [Head Image]                   │  [Head Image]                             │
+│   Arm reaching toward table     │   Arm at rest position                    │
+├─────────────────────────────────┼───────────────────────────────────────────┤
+│  [Cross-Attention Heatmap]      │  [Cross-Attention Heatmap]                │
+│   Image: 95%, Lang: 5%          │   Image: 92%, Lang: 8%                    │
+├─────────────────────────────────┼───────────────────────────────────────────┤
+│  [Denoising Velocity Plot]      │  [Denoising Velocity Plot]                │
+│   High magnitude, directed      │   Low magnitude, stationary               │
+├─────────────────────────────────┼───────────────────────────────────────────┤
+│  Action Delta: 12.3             │  Action Delta: 2.1                        │
+│  Gripper: OPENING (30.9)        │  Gripper: CLOSED (7.2)                    │
+└─────────────────────────────────┴───────────────────────────────────────────┘
+```
+
+### 9.9 Investigation Timeline
+
+| Phase | Duration | Activities |
+|-------|----------|------------|
+| Phase 2a | 2-3 days | Build probes, run Experiments 1-2 (normal characterization, divergence) |
+| Phase 2b | 2-3 days | Run Experiments 3-4 (KV cache ablation, denoising comparison) |
+| Phase 2c | 1-2 days | Run Experiment 5 (language attention), aggregate findings |
+| Phase 2d | 1 day | Write mechanistic understanding report |
+
+### 9.10 Key Code Locations for Probing
+
+| Component | File | Lines | What to Capture |
+|-----------|------|-------|-----------------|
+| Vision encoding | `modeling_smolvla.py` | 403-443 | Image preprocessing, patch creation |
+| Prefix embedding | `modeling_smolvla.py` | 598-690 | Token assembly, attention masks |
+| KV cache creation | `modeling_smolvla.py` | 797-804 | `past_key_values` structure |
+| Cross-attention | `smolvlm_with_expert.py` | 539-584 | `attn_weights` after softmax |
+| Denoising loop | `modeling_smolvla.py` | 809-841 | `x_t`, `v_t` at each step |
+| Action output | `modeling_smolvla.py` | 848-858 | Final action projection |
