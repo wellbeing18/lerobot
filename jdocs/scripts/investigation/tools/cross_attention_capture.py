@@ -560,6 +560,7 @@ def map_attention_to_spatial_per_camera(
     cross_attention: np.ndarray,
     layout: dict,
     debug: bool = False,
+    use_global_normalization: bool = True,
 ) -> dict:
     """
     Map cross-attention to spatial heatmaps for each camera.
@@ -567,6 +568,8 @@ def map_attention_to_spatial_per_camera(
     Args:
         cross_attention: [heads, actions, prefix] or [batch, heads, actions, prefix]
         layout: Token layout from infer_token_layout()
+        use_global_normalization: If True, normalize all cameras using global min/max
+                                  to enable cross-camera comparison. Default: True.
 
     Returns:
         dict with spatial attention maps per camera:
@@ -583,8 +586,9 @@ def map_attention_to_spatial_per_camera(
     target_size = grid_size * grid_size
 
     result = {}
+    raw_spatials = {}  # Store raw values before normalization
 
-    def extract_and_reshape(start, end):
+    def extract_and_reshape(start, end, name):
         """Extract attention slice and reshape to spatial grid."""
         attn_slice = cross_attention[:, :, start:end]
         attn_avg = attn_slice.mean(axis=(0, 1))  # Average over heads and actions
@@ -596,19 +600,34 @@ def map_attention_to_spatial_per_camera(
             attn_to_reshape = np.pad(attn_avg, (0, target_size - len(attn_avg)))
 
         spatial = attn_to_reshape.reshape(grid_size, grid_size)
-        # Normalize to [0, 1]
-        spatial = (spatial - spatial.min()) / (spatial.max() - spatial.min() + 1e-10)
+        raw_spatials[name] = spatial.copy()  # Store raw before normalization
         return spatial
 
     # Head camera (always present)
-    result["head"] = extract_and_reshape(layout["head_start"], layout["head_end"])
+    result["head"] = extract_and_reshape(layout["head_start"], layout["head_end"], "head")
 
     # Left and right wrist (if 3 cameras)
     if layout["num_cameras"] == 3:
-        result["left_wrist"] = extract_and_reshape(layout["left_start"], layout["left_end"])
-        result["right_wrist"] = extract_and_reshape(layout["right_start"], layout["right_end"])
+        result["left_wrist"] = extract_and_reshape(layout["left_start"], layout["left_end"], "left_wrist")
+        result["right_wrist"] = extract_and_reshape(layout["right_start"], layout["right_end"], "right_wrist")
 
-    # Combined (all image tokens)
+    # Apply normalization
+    if use_global_normalization and len(raw_spatials) > 1:
+        # Global normalization: use min/max across ALL cameras for fair comparison
+        all_values = np.concatenate([s.flatten() for s in raw_spatials.values()])
+        global_min = all_values.min()
+        global_max = all_values.max()
+
+        for name in raw_spatials:
+            spatial = raw_spatials[name]
+            result[name] = (spatial - global_min) / (global_max - global_min + 1e-10)
+    else:
+        # Per-camera normalization (original behavior)
+        for name in raw_spatials:
+            spatial = raw_spatials[name]
+            result[name] = (spatial - spatial.min()) / (spatial.max() - spatial.min() + 1e-10)
+
+    # Combined (all image tokens) - always uses its own normalization
     total_img_end = layout["total_image_tokens"]
     attn_all_img = cross_attention[:, :, :total_img_end].mean(axis=(0, 1))
     # For combined, try to make a reasonable grid
@@ -1149,28 +1168,34 @@ def analyze_case_cross_attention(
         title=f"Per-Camera Attention (inf step {last_inf_step})\n⚠️ Check if Right Wrist is elevated in hallucination case",
     )
 
-    # NEW: Per-camera spatial heatmaps for key denoising step (step 5 = middle)
-    mid_denoise_step = 5
-    if mid_denoise_step in all_step_data[last_inf_step]:
-        data = all_step_data[last_inf_step][mid_denoise_step]
-        if data.per_camera:
-            spatial_maps = {
-                'head': data.per_camera.head_spatial,
-                'left_wrist': data.per_camera.left_wrist_spatial,
-                'right_wrist': data.per_camera.right_wrist_spatial,
-            }
-            plot_per_camera_spatial_heatmaps(
-                spatial_maps,
-                images=last_images if isinstance(last_images, dict) else None,
-                output_path=output_dir / "per_camera_spatial_heatmaps.png",
-                title=f"Per-Camera Spatial Attention (inf {last_inf_step}, denoise {mid_denoise_step})",
-            )
-
-    # Save individual spatial attention maps for ALL inference steps
+    # Save individual spatial attention maps and generate heatmaps for ALL inference steps
     heatmaps_dir = output_dir / "heatmaps"
     heatmaps_dir.mkdir(exist_ok=True)
 
+    # Key denoise step for visualizations (middle of denoising process)
+    mid_denoise_step = 5
+
+    # Generate per-camera spatial heatmaps for ALL key inference steps
+    print("\nGenerating per-camera spatial heatmaps for all inference steps...")
     for inf_step, denoise_dict in all_step_data.items():
+        # Generate per-camera 3-panel heatmap for this inference step (denoise step 5)
+        if mid_denoise_step in denoise_dict:
+            data = denoise_dict[mid_denoise_step]
+            if data.per_camera and inf_step in images_for_overlay:
+                spatial_maps = {
+                    'head': data.per_camera.head_spatial,
+                    'left_wrist': data.per_camera.left_wrist_spatial,
+                    'right_wrist': data.per_camera.right_wrist_spatial,
+                }
+                img_dict = images_for_overlay[inf_step]
+                plot_per_camera_spatial_heatmaps(
+                    spatial_maps,
+                    images=img_dict if isinstance(img_dict, dict) else None,
+                    output_path=heatmaps_dir / f"inf_{inf_step:04d}_per_camera.png",
+                    title=f"Per-Camera Spatial Attention (inf {inf_step}, denoise {mid_denoise_step})",
+                )
+
+        # Save .npy files and generate overlays for all denoise steps
         for denoise_step, data in denoise_dict.items():
             if data.spatial_attention is not None:
                 # Save raw spatial attention as .npy for quantitative analysis
@@ -1185,28 +1210,54 @@ def analyze_case_cross_attention(
                     if data.per_camera.right_wrist_spatial is not None:
                         np.save(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}_right_wrist.npy", data.per_camera.right_wrist_spatial)
 
-                # Generate overlay for head camera (backward compatible)
-                if inf_step in images_for_overlay:
+                # Generate 3-panel per-camera overlay for key denoise steps (0, 5, 9)
+                if denoise_step in [0, 5, 9] and data.per_camera and inf_step in images_for_overlay:
                     img_dict = images_for_overlay[inf_step]
-                    head_img = img_dict.get('head') if isinstance(img_dict, dict) else img_dict
-                    if head_img is not None:
-                        overlay = create_attention_heatmap_overlay(head_img, data.spatial_attention)
-
-                        fig, ax = plt.subplots(figsize=(8, 8))
-                        ax.imshow(overlay)
-
-                        # Build title with per-camera info if available
-                        title_parts = [
-                            f"Inf {inf_step}, Denoise {denoise_step} (t={data.time:.1f})",
-                            f"Image: {data.image_attention_ratio:.2f}, Lang: {data.language_attention_ratio:.2f}",
+                    if isinstance(img_dict, dict):
+                        spatial_maps = {
+                            'head': data.per_camera.head_spatial,
+                            'left_wrist': data.per_camera.left_wrist_spatial,
+                            'right_wrist': data.per_camera.right_wrist_spatial,
+                        }
+                        # Create 3-panel figure
+                        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+                        camera_info = [
+                            ('head', 'Head Camera', img_dict.get('head')),
+                            ('left_wrist', 'Left Wrist', img_dict.get('left_wrist')),
+                            ('right_wrist', 'Right Wrist ⚠️', img_dict.get('right_wrist')),
                         ]
-                        if data.per_camera:
-                            title_parts.append(f"Head: {data.per_camera.head_camera:.1%}, Left: {data.per_camera.left_wrist:.1%}, Right: {data.per_camera.right_wrist:.1%}")
+                        for ax, (cam_key, cam_label, cam_img) in zip(axes, camera_info):
+                            if cam_img is not None and spatial_maps.get(cam_key) is not None:
+                                overlay = create_attention_heatmap_overlay(cam_img, spatial_maps[cam_key], alpha=0.6)
+                                ax.imshow(overlay)
+                            else:
+                                ax.text(0.5, 0.5, "No image", ha='center', va='center')
+                            ax.set_title(cam_label, fontsize=11, fontweight='bold')
+                            ax.axis('off')
 
-                        ax.set_title('\n'.join(title_parts), fontsize=9)
-                        ax.axis('off')
-                        plt.savefig(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}.png", dpi=150, bbox_inches='tight')
+                        # Add overall title with metrics
+                        title = f"Inf {inf_step}, Denoise {denoise_step} (t={data.time:.1f})\n"
+                        title += f"Head: {data.per_camera.head_camera:.1%}, Left: {data.per_camera.left_wrist:.1%}, Right: {data.per_camera.right_wrist:.1%}"
+                        plt.suptitle(title, fontsize=10)
+                        plt.tight_layout()
+                        plt.savefig(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}_3panel.png", dpi=150, bbox_inches='tight')
                         plt.close()
+
+    # Also save a summary per-camera spatial heatmap for the last inference step (backward compatible)
+    if mid_denoise_step in all_step_data[last_inf_step]:
+        data = all_step_data[last_inf_step][mid_denoise_step]
+        if data.per_camera:
+            spatial_maps = {
+                'head': data.per_camera.head_spatial,
+                'left_wrist': data.per_camera.left_wrist_spatial,
+                'right_wrist': data.per_camera.right_wrist_spatial,
+            }
+            plot_per_camera_spatial_heatmaps(
+                spatial_maps,
+                images=last_images if isinstance(last_images, dict) else None,
+                output_path=output_dir / "per_camera_spatial_heatmaps.png",
+                title=f"Per-Camera Spatial Attention (inf {last_inf_step}, denoise {mid_denoise_step})",
+            )
 
     # Store in analysis with nested structure (includes per-camera data)
     analysis_dict = {}
@@ -1249,9 +1300,12 @@ def analyze_case_cross_attention(
     print(f"\nAnalysis saved to: {output_dir}")
     print(f"  - temporal_evolution.png")
     print(f"  - attention_metrics.png")
-    print(f"  - per_camera_attention.png  ← NEW: Check right wrist attention!")
-    print(f"  - per_camera_spatial_heatmaps.png  ← NEW: Side-by-side camera heatmaps")
-    print(f"  - heatmaps/ (with per-camera .npy files)")
+    print(f"  - per_camera_attention.png  ← Check right wrist attention!")
+    print(f"  - per_camera_spatial_heatmaps.png  ← Side-by-side camera heatmaps")
+    print(f"  - heatmaps/")
+    print(f"      - inf_XXXX_per_camera.png  ← 3-panel heatmaps for ALL inference steps")
+    print(f"      - inf_XXXX_denoise_XX_3panel.png  ← 3-panel for key denoise steps (0,5,9)")
+    print(f"      - *.npy files for quantitative analysis")
     print(f"  - cross_attention_analysis.json (with per_camera breakdown)")
 
     return analysis
@@ -1268,8 +1322,9 @@ def main():
 
     parser.add_argument("--case-dir", type=Path, required=True,
                        help="Case directory with images and metadata")
-    parser.add_argument("--output-dir", "-o", type=Path, required=True,
-                       help="Output directory for analysis results")
+    parser.add_argument("--output-dir", "-o", type=Path, default=None,
+                       help="Output directory for analysis results. "
+                            "Default: logs/analysis/{case_name}/cross_attention/")
     parser.add_argument("--checkpoint", "-c", type=str, default=None,
                        help="Model checkpoint (uses case metadata if not specified)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -1281,6 +1336,12 @@ def main():
     parser.add_argument("--case2", type=Path, help="Second case for comparison")
 
     args = parser.parse_args()
+
+    # Set default output directory based on case name if not specified
+    if args.output_dir is None:
+        case_name = args.case_dir.name
+        args.output_dir = Path("logs/analysis") / case_name / "cross_attention"
+        print(f"Using default output directory: {args.output_dir}")
 
     print("=" * 60)
     print("SmolVLA Cross-Attention Analysis")
