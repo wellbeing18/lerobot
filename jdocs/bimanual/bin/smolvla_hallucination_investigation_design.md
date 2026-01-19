@@ -1360,8 +1360,10 @@ Chunk 6 (300-349): Late phase
 |------|---------|--------|
 | `characterize_normal_behavior.py` | Document normal "stay still" mechanism | ✅ Complete |
 | `divergence_analysis.py` | Compare cases, find divergence point | ✅ Complete |
-| `denoising_trajectory_capture.py` | Track x_t, v_t during 10-step denoising | 🔲 To build |
-| `cross_attention_comparison.py` | Compare attention across 3 cases | 🔲 To build |
+| `denoising_trajectory_capture.py` | Track x_t, v_t during 10-step denoising | ✅ Complete |
+| `kv_cache_analysis.py` | Compare KV cache contents between cases | ✅ Complete |
+| `cross_attention_capture.py` | Capture cross-attention patterns | ✅ Complete (existing) |
+| `distractor_attention.py` | Quantify attention to distractor regions | ✅ Complete (existing) |
 
 ### 10.7 Cross-Attention Analysis Results
 
@@ -1413,3 +1415,81 @@ Given that cross-attention patterns are similar, the root cause likely lies in:
    - Mask banana region in image
    - Check if hallucination persists
    - If masking fixes it, spatial location is key
+
+### 10.10 Integration Guide: Running Live Capture
+
+To capture denoising trajectories and KV cache during inference:
+
+```python
+# In inference script (e.g., infer_smolvla_bimanual.py)
+
+from jdocs.scripts.investigation.tools.denoising_trajectory_capture import DenoisingTrajectoryCapture
+from jdocs.scripts.investigation.tools.kv_cache_analysis import KVCacheCapture
+
+# Initialize captures
+denoising_capture = DenoisingTrajectoryCapture()
+kv_capture = KVCacheCapture()
+
+# At chunk boundary (every 50 steps), capture KV cache
+def on_new_chunk(model, past_key_values, inference_step):
+    kv_capture.capture(past_key_values, inference_step)
+    denoising_capture.start_capture(inference_step)
+
+# During denoising loop, capture trajectory
+def on_denoise_step(step, time, x_t, v_t, dt):
+    denoising_capture.capture_denoising_step(step, time, x_t, v_t, dt)
+
+# After chunk complete
+def on_chunk_complete(inference_step):
+    denoising_capture.stop_capture()
+
+# At end of inference
+denoising_capture.save_analysis(output_dir / "denoising_captures")
+kv_capture.save(output_dir / "kv_captures")
+```
+
+**Modified denoise_step wrapper** (add to modeling_smolvla.py for debugging):
+
+```python
+# In SmolVLAForActionPrediction.run_inference(), around line 837:
+for time in torch.linspace(1, self.config.final_sigma, num_steps):
+    # ... existing code ...
+    v_t = denoise_step_partial_call(x_t)
+
+    # DEBUG: Capture for investigation
+    if hasattr(self, '_denoising_capture') and self._denoising_capture is not None:
+        step_idx = int((1.0 - time.item()) * 10)
+        self._denoising_capture.capture_denoising_step(
+            step=step_idx, time=float(time), x_t=x_t, v_t=v_t, dt=dt
+        )
+
+    x_t = x_t + dt * v_t
+```
+
+### 10.11 Expected Outputs
+
+After running with captures enabled:
+
+```
+logs/yogurt_banana_leftarm/
+├── denoising_captures/
+│   ├── denoising_step_0200.json    # Chunk 4 trajectory evolution
+│   ├── denoising_step_0250.json    # Chunk 5
+│   └── ...
+├── kv_captures/
+│   ├── kv_cache_step_0200.pt       # KV cache at chunk 4 start
+│   └── ...
+└── analysis/
+    ├── denoising_evolution.png     # When does RAMP emerge?
+    ├── kv_diff_per_layer.png       # Which layer has most difference?
+    └── kv_diff_by_region.png       # Image vs language difference
+```
+
+### 10.12 Key Questions to Answer with Live Capture
+
+| Question | Data Needed | Expected Finding |
+|----------|-------------|------------------|
+| When does RAMP emerge in denoising? | x_t at steps 0-9 | If early (0-2): KV cache is cause. If late (7-9): velocity field issue |
+| Are image representations different? | KV cache image region | Difference in image key/values = visual encoding differs |
+| Are language representations different? | KV cache language region | Should be similar (same prompt) |
+| Which layer contributes most? | Per-layer KV diff | Identify critical layer for intervention |
