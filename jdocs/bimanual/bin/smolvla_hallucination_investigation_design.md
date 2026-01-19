@@ -1264,3 +1264,117 @@ Create side-by-side comparison at key steps:
 | Cross-attention | `smolvlm_with_expert.py` | 539-584 | `attn_weights` after softmax |
 | Denoising loop | `modeling_smolvla.py` | 809-841 | `x_t`, `v_t` at each step |
 | Action output | `modeling_smolvla.py` | 848-858 | Final action projection |
+
+---
+
+## 10. Phase 2a Findings: Trajectory Shape Analysis
+
+### 10.1 Experimental Setup
+
+Three cases collected with controlled banana position:
+
+| Case ID | Banana Location | Hallucination? | Trace Path |
+|---------|-----------------|----------------|------------|
+| halluc_table | On table (near workspace) | **YES** | `case_20260119_131914_ha_bana_table` |
+| normal_plate | On plate (away from workspace) | No | `case_20260119_132946_no_ha_plate` |
+| normal_none | Not present | No | `case_20260119_133142_no_ha_no_other_obj` |
+
+### 10.2 Key Discovery: action_raw vs action_final
+
+**Critical insight**: The divergence is in `action_raw` (normalized model output), NOT in denormalization.
+
+```
+action_raw  → Normalized model output (around 0 = training mean)
+action_final → Denormalized for robot execution
+```
+
+| Case | action_raw J1 (step 200) | action_final J1 (step 200) | Robot Behavior |
+|------|--------------------------|----------------------------|----------------|
+| Normal | -0.74 | -100.25 | Stays at -100.40 (still) |
+| Halluc | -0.71 to +1.03 (ramp) | -99.00 to +6.12 (ramp) | Moves from -101 to +1 |
+
+### 10.3 Trajectory Shape Comparison (3 Cases)
+
+**Chunk 4 (Steps 200-249) - Critical Divergence Point:**
+
+| Case | Start J1 | End J1 | Delta | Shape | Interpretation |
+|------|----------|--------|-------|-------|----------------|
+| halluc_table | -0.71 | +1.03 | **+1.74** | **RAMP UP ↑** | "Move forward for 50 steps" |
+| normal_plate | -0.25 | -0.73 | -0.49 | RAMP DOWN ↓ | "Settle to still" |
+| normal_none | -0.74 | -0.73 | +0.01 | **FLAT** | "Stay still for 50 steps" |
+
+**Full Chunk Timeline:**
+
+```
+Chunk 3 (150-199): Return to home - ALL cases show RAMP DOWN (expected)
+Chunk 4 (200-249): DIVERGENCE POINT
+  - halluc_table: RAMP UP ↑ (+1.74) ← HALLUCINATION STARTS
+  - normal_plate: RAMP DOWN ↓ (-0.49) ← Still settling
+  - normal_none:  FLAT (+0.01) ← Perfect stay-still
+
+Chunk 5 (250-299): Sustained behavior
+  - halluc_table: RAMP UP ↑ (+0.75) ← Hallucination continues
+  - normal_plate: FLAT (-0.01) ← Settled to stay-still
+  - normal_none:  FLAT (+0.00) ← Continues stay-still
+
+Chunk 6 (300-349): Late phase
+  - halluc_table: RAMP DOWN ↓ (-0.35) ← Starting to return
+  - normal_plate: FLAT (-0.01)
+  - normal_none:  FLAT (+0.00)
+```
+
+### 10.4 Key Insights
+
+1. **Banana position matters, not just presence**:
+   - Banana on table → Hallucination (RAMP UP trajectory)
+   - Banana on plate → No hallucination (self-corrects to FLAT)
+   - No banana → No hallucination (FLAT from start)
+
+2. **Normal-plate case self-corrects**:
+   - Starts with perturbation in chunk 4 (-0.25, not -0.74)
+   - Settles to FLAT by chunk 5
+   - Model CAN handle distractor if not in workspace
+
+3. **Hallucination is a sustained RAMP, not random noise**:
+   - Consistent upward trend: -0.71 → +1.03 → +1.76
+   - Model predicts "gradually move forward" trajectory
+   - This is a coherent (but wrong) plan, not noise
+
+4. **Divergence emerges WITHIN chunk, not at boundary**:
+   - At chunk 4 start (step 200), difference is small (0.079)
+   - Grows throughout chunk to 4.45 by step 249
+   - The 50-step trajectory SHAPE is different
+
+### 10.5 Remaining Questions
+
+| Question | Why It Matters | How to Answer |
+|----------|---------------|---------------|
+| What visual features trigger RAMP vs FLAT? | Identifies root cause | Compare cross-attention heatmaps |
+| At which denoising step does RAMP emerge? | Locates mechanism | Capture x_t at each of 10 steps |
+| Why does banana-on-table prevent self-correction? | Explains sustained hallucination | Compare KV cache contents |
+| Is the "ramp" trajectory learned from training? | Training vs inference issue | Analyze training trajectories |
+
+### 10.6 Tools Built
+
+| Tool | Purpose | Status |
+|------|---------|--------|
+| `characterize_normal_behavior.py` | Document normal "stay still" mechanism | ✅ Complete |
+| `divergence_analysis.py` | Compare cases, find divergence point | ✅ Complete |
+| `denoising_trajectory_capture.py` | Track x_t, v_t during 10-step denoising | 🔲 To build |
+| `cross_attention_comparison.py` | Compare attention across 3 cases | 🔲 To build |
+
+### 10.7 Next Steps
+
+1. **Build denoising trajectory capture tool**:
+   - Hook into `denoise_step` method
+   - Capture x_t and velocity v_t at each of 10 steps
+   - Compare trajectory evolution between cases
+
+2. **Analyze cross-attention at chunk 4 start**:
+   - What image patches get attention in each case?
+   - Does banana-on-table get different attention than banana-on-plate?
+
+3. **Test hypothesis: Workspace region attention**:
+   - Banana on table is IN the workspace region
+   - Banana on plate is OUTSIDE workspace region
+   - Model may attend to workspace and see "object to interact with"
