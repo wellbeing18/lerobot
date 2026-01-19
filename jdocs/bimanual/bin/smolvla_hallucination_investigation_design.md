@@ -1363,18 +1363,53 @@ Chunk 6 (300-349): Late phase
 | `denoising_trajectory_capture.py` | Track x_t, v_t during 10-step denoising | 🔲 To build |
 | `cross_attention_comparison.py` | Compare attention across 3 cases | 🔲 To build |
 
-### 10.7 Next Steps
+### 10.7 Cross-Attention Analysis Results
 
-1. **Build denoising trajectory capture tool**:
-   - Hook into `denoise_step` method
-   - Capture x_t and velocity v_t at each of 10 steps
-   - Compare trajectory evolution between cases
+**Cross-attention RATIOS are similar between cases:**
 
-2. **Analyze cross-attention at chunk 4 start**:
-   - What image patches get attention in each case?
-   - Does banana-on-table get different attention than banana-on-plate?
+| Case | Image Attention | Language Attention | State Attention |
+|------|-----------------|-------------------|-----------------|
+| Hallucination | 86.6% | 13.3% | 0.01% |
+| Normal | 87.9% | 12.1% | 0.01% |
 
-3. **Test hypothesis: Workspace region attention**:
+**Spatial attention differences are SMALL:**
+- Max positive diff: 0.074 (Halluc attends MORE to patch 13,12 - possible banana region)
+- Max negative diff: -0.129 (Halluc attends LESS to patch 13,2 - possible bottle area)
+- Regional mean diff: Left half = 0.00019, Right half = 0.00040
+
+**Key Insight**: Cross-attention patterns are NOT dramatically different between cases.
+The hallucination is NOT caused by obvious attention to the banana distractor.
+
+### 10.8 Revised Hypothesis
+
+Given that cross-attention patterns are similar, the root cause likely lies in:
+
+1. **KV Cache Content Difference**:
+   - Same attention pattern, but attending to DIFFERENT representations
+   - Banana on table changes the visual embedding in subtle ways
+   - Model "sees" similar attention weights but "reads" different information
+
+2. **Denoising Trajectory Evolution**:
+   - Initial noise may be similar, but velocity fields diverge
+   - Need to capture x_t at each denoising step to verify
+
+3. **Implicit Workspace Detection**:
+   - Model may have learned "objects on table = potential pick targets"
+   - Banana on plate is spatially separate from workspace
    - Banana on table is IN the workspace region
-   - Banana on plate is OUTSIDE workspace region
-   - Model may attend to workspace and see "object to interact with"
+
+### 10.9 Next Steps
+
+1. **Capture denoising trajectory**:
+   - Tool built: `denoising_trajectory_capture.py`
+   - Requires integration into inference script
+   - Will reveal WHEN ramp shape emerges
+
+2. **Analyze KV cache contents**:
+   - Compare key/value states at step 200 between cases
+   - Look for subtle representation differences
+
+3. **Test workspace hypothesis**:
+   - Mask banana region in image
+   - Check if hallucination persists
+   - If masking fixes it, spatial location is key
