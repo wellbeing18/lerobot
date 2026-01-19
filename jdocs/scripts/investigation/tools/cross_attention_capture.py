@@ -12,12 +12,21 @@ actions - this is what matters for diagnosing hallucination.
 
 Hook location: smolvlm_with_expert.py:575 (after softmax in eager_attention_forward)
 
-Token layout in VLM prefix (778 total):
-  [0-1]     Image special tokens
-  [2-730]   Image patches (729 = 27x27 grid from SigLIP)
-  [731]     Image end token
-  [732-779] Language tokens (~48)
-  [780]     State token
+**UPDATED TOKEN LAYOUT (3 cameras):**
+
+SmolVLA uses 3 camera images concatenated into a single prefix sequence.
+For 512x512 images with SigLIP (14x14 patches → 24x24 grid = 576 patches per camera):
+
+Token layout in VLM prefix (~1777 total):
+  [0-575]      Head camera patches (576 = 24x24)
+  [576-1151]   Left wrist camera patches (576)
+  [1152-1727]  Right wrist camera patches (576)
+  [1728-1775]  Language tokens (~48)
+  [1776]       State token
+
+CRITICAL: Previous analysis only examined head camera (729 patches assumed).
+This update adds per-camera attention breakdown to identify if RIGHT WRIST
+camera (where banana is visible at step 200+ in hallucination case) is the trigger.
 
 Usage:
     python cross_attention_capture.py \
@@ -46,29 +55,63 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 
 # ============================================================================
-# TOKEN LAYOUT CONSTANTS
+# TOKEN LAYOUT CONSTANTS (CORRECTED BASED ON ACTUAL MODEL)
 # ============================================================================
 
-# SigLIP image patch configuration (384x384 input with 14x14 patch size)
-PATCH_GRID_SIZE = 27  # 384 / 14 ≈ 27
-NUM_IMAGE_PATCHES = PATCH_GRID_SIZE * PATCH_GRID_SIZE  # 729
+# IMPORTANT: SmolVLA compresses 512x512 images to only ~64 tokens per camera!
+# This is due to the multi_modal_projector pooling after SigLIP.
+# Verified by running check_prefix_length.py:
+#   - 3 images at 512x512 → 192 image tokens total (64 per camera, 8x8 grid)
+#   - Plus ~48 language tokens + ~1 state token = 241 total prefix tokens
 
-# Token indices in VLM prefix
-IMAGE_SPECIAL_START = 0
-IMAGE_PATCHES_START = 2
-IMAGE_PATCHES_END = 2 + NUM_IMAGE_PATCHES  # 731
-IMAGE_SPECIAL_END = IMAGE_PATCHES_END + 1  # 732
-LANGUAGE_START = IMAGE_SPECIAL_END  # 732
-LANGUAGE_END = 780  # Approximate, varies by task
-STATE_INDEX = 780
+PATCHES_PER_CAMERA = 64  # 8x8 grid per camera (VERIFIED)
+PATCH_GRID_SIZE = 8  # sqrt(64)
+NUM_CAMERAS = 3  # head, left_wrist, right_wrist
+
+# Token indices in VLM prefix (for 3 cameras)
+# Layout: [head_patches | left_wrist_patches | right_wrist_patches | language | state]
+HEAD_CAMERA_START = 0
+HEAD_CAMERA_END = PATCHES_PER_CAMERA  # 64
+LEFT_WRIST_START = HEAD_CAMERA_END  # 64
+LEFT_WRIST_END = LEFT_WRIST_START + PATCHES_PER_CAMERA  # 128
+RIGHT_WRIST_START = LEFT_WRIST_END  # 128
+RIGHT_WRIST_END = RIGHT_WRIST_START + PATCHES_PER_CAMERA  # 192
+
+# Language tokens follow images
+LANGUAGE_START = RIGHT_WRIST_END  # 192
+LANGUAGE_TOKENS_APPROX = 48
+LANGUAGE_END = LANGUAGE_START + LANGUAGE_TOKENS_APPROX  # 240
+
+# State token is last
+STATE_INDEX = LANGUAGE_END  # 240
+
+# Total prefix tokens
+TOTAL_PREFIX_TOKENS = 241  # Verified by check_prefix_length.py
 
 # Action tokens
 NUM_ACTION_TOKENS = 50  # Chunk size
+
+# Legacy single-camera constants (for backward compatibility)
+LEGACY_PATCH_GRID_SIZE = 27
+LEGACY_NUM_IMAGE_PATCHES = LEGACY_PATCH_GRID_SIZE * LEGACY_PATCH_GRID_SIZE  # 729
 
 
 # ============================================================================
 # DATA STRUCTURES
 # ============================================================================
+
+@dataclass
+class PerCameraAttention:
+    """Attention breakdown per camera."""
+    head_camera: float = 0.0  # % attention to head camera patches
+    left_wrist: float = 0.0  # % attention to left wrist patches
+    right_wrist: float = 0.0  # % attention to right wrist patches
+
+    # Spatial attention maps per camera (24x24 each)
+    head_spatial: Optional[np.ndarray] = None
+    left_wrist_spatial: Optional[np.ndarray] = None
+    right_wrist_spatial: Optional[np.ndarray] = None
+
 
 @dataclass
 class DenoiseStepAttention:
@@ -77,14 +120,18 @@ class DenoiseStepAttention:
     time: float  # 1.0 -> 0.1
     layer_idx: int  # Which transformer layer
 
-    # Attention statistics
-    image_attention_ratio: float = 0.0  # % attention to image patches
+    # Attention statistics (combined)
+    image_attention_ratio: float = 0.0  # % attention to ALL image patches
     language_attention_ratio: float = 0.0  # % attention to language tokens
     state_attention_ratio: float = 0.0  # % attention to state token
     attention_entropy: float = 0.0  # Shannon entropy (lower = more focused)
 
+    # PER-CAMERA BREAKDOWN (NEW)
+    per_camera: Optional[PerCameraAttention] = None
+
     # Spatial attention map (average over heads and action tokens)
-    spatial_attention: Optional[np.ndarray] = None  # [27, 27]
+    # For backward compatibility, this is the combined/first camera
+    spatial_attention: Optional[np.ndarray] = None  # [24, 24] or [27, 27]
 
 
 @dataclass
@@ -341,65 +388,240 @@ def map_attention_to_spatial(
     return spatial_attn
 
 
+def infer_token_layout(prefix_len: int, debug: bool = False) -> dict:
+    """
+    Infer token layout from actual prefix length.
+
+    IMPORTANT: The attention matrix key dimension may include action tokens for self-attention.
+    If key_len > 250, it likely includes 50 action tokens that should be excluded.
+
+    SmolVLA prefix layouts (verified by check_prefix_length.py):
+    - 3 cameras: ~241 tokens (64 patches × 3 cameras + 48 lang + 1 state)
+    - Attention key_len: ~291 (241 prefix + 50 action self-attention)
+
+    Returns:
+        dict with camera boundaries and layout info
+    """
+    # If key_len includes action tokens (50), remove them first
+    # Check if prefix_len > 250, indicating action tokens are included
+    actual_prefix_len = prefix_len
+    if prefix_len > 250:
+        actual_prefix_len = prefix_len - NUM_ACTION_TOKENS  # Remove 50 action tokens
+        if debug:
+            print(f"    Detected action tokens in key: {prefix_len} - 50 = {actual_prefix_len} prefix tokens")
+
+    # Estimate language+state tokens at end (~49)
+    estimated_lang_state = 49  # 48 language + 1 state
+
+    total_image_tokens = actual_prefix_len - estimated_lang_state
+
+    # Determine number of cameras based on actual prefix length
+    # 3 cameras with 64 patches each = 192 image tokens → ~241 total prefix
+    if 180 <= total_image_tokens <= 210:  # Around 192 = 3 cameras × 64
+        num_cameras = 3
+        patches_per_camera = total_image_tokens // 3  # ~64
+    elif total_image_tokens > 210:  # More tokens = likely 1 camera with more patches
+        num_cameras = 1
+        patches_per_camera = total_image_tokens
+    else:
+        # Fallback: assume single camera
+        num_cameras = 1
+        patches_per_camera = max(total_image_tokens, 64)
+
+    grid_size = int(np.sqrt(patches_per_camera))
+
+    layout = {
+        "num_cameras": num_cameras,
+        "patches_per_camera": patches_per_camera,
+        "grid_size": grid_size,
+        "total_image_tokens": total_image_tokens,
+        "lang_state_tokens": estimated_lang_state,
+        "actual_prefix_len": actual_prefix_len,  # Without action tokens
+        "raw_key_len": prefix_len,  # Original key length
+    }
+
+    if num_cameras == 3:
+        # Exact boundaries for 3-camera layout
+        layout["head_start"] = 0
+        layout["head_end"] = patches_per_camera  # ~64
+        layout["left_start"] = patches_per_camera  # ~64
+        layout["left_end"] = 2 * patches_per_camera  # ~128
+        layout["right_start"] = 2 * patches_per_camera  # ~128
+        layout["right_end"] = 3 * patches_per_camera  # ~192
+        layout["lang_start"] = 3 * patches_per_camera  # ~192
+        layout["lang_end"] = actual_prefix_len - 1
+        layout["state_idx"] = actual_prefix_len - 1
+    else:
+        layout["head_start"] = 0
+        layout["head_end"] = total_image_tokens
+        layout["left_start"] = None
+        layout["left_end"] = None
+        layout["right_start"] = None
+        layout["right_end"] = None
+        layout["lang_start"] = total_image_tokens
+        layout["lang_end"] = actual_prefix_len - 1
+        layout["state_idx"] = actual_prefix_len - 1
+
+    if debug:
+        print(f"    Key length: {prefix_len}, actual prefix: {actual_prefix_len}, inferred {num_cameras} cameras")
+        print(f"    Image tokens: {total_image_tokens}, patches per camera: {patches_per_camera} ({grid_size}x{grid_size} grid)")
+        if num_cameras == 3:
+            print(f"    Head=[0:{layout['head_end']}], Left=[{layout['left_start']}:{layout['left_end']}], Right=[{layout['right_start']}:{layout['right_end']}]")
+            print(f"    Lang=[{layout['lang_start']}:{layout['lang_end']}], State=[{layout['state_idx']}]")
+
+    return layout
+
+
 def compute_attention_metrics(
     cross_attention: np.ndarray,
     prefix_len: Optional[int] = None,
     debug: bool = False,
 ) -> dict:
     """
-    Compute attention distribution metrics.
+    Compute attention distribution metrics WITH PER-CAMERA BREAKDOWN.
 
     Args:
-        cross_attention: [heads, actions, prefix] or [batch, heads, actions, prefix]
+        cross_attention: [heads, actions, key_len] or [batch, heads, actions, key_len]
+                        Note: key_len may include action tokens for self-attention
         debug: Print debug info
 
     Returns:
-        dict with image_ratio, language_ratio, state_ratio, entropy
+        dict with:
+        - image_ratio, language_ratio, state_ratio, entropy (combined)
+        - per_camera: {head_camera, left_wrist, right_wrist} (if 3 cameras detected)
     """
     if cross_attention.ndim == 4:
         cross_attention = cross_attention[0]
 
-    num_heads, num_actions, actual_prefix_len = cross_attention.shape
+    num_heads, num_actions, key_len = cross_attention.shape
 
-    # Estimate token boundaries based on actual prefix length
-    # Assume last ~50 tokens are language + state
-    estimated_lang_state = min(50, actual_prefix_len // 5)
-    img_end = actual_prefix_len - estimated_lang_state
-    lang_start = img_end
-    lang_end = actual_prefix_len - 1  # Last token is state
-    state_idx = actual_prefix_len - 1
+    # Infer token layout (handles action tokens in key dimension)
+    layout = infer_token_layout(key_len, debug=debug)
 
-    if debug:
-        print(f"    Token layout: image=[0:{img_end}], lang=[{lang_start}:{lang_end}], state=[{state_idx}]")
+    # Get actual prefix length (without action tokens)
+    actual_prefix_len = layout["actual_prefix_len"]
+
+    # Only analyze attention to prefix tokens, not action self-attention
+    # Truncate to actual prefix length
+    cross_attention = cross_attention[:, :, :actual_prefix_len]
 
     # Compute total attention per region (sum over heads and actions)
     total_attn = cross_attention.sum()
 
-    # Image attention
-    image_attn = cross_attention[:, :, :img_end].sum() / total_attn if img_end > 0 else 0
+    # Combined image attention
+    total_image_end = layout["total_image_tokens"]
+    image_attn = cross_attention[:, :, :total_image_end].sum() / total_attn if total_image_end > 0 else 0
 
     # Language attention
+    lang_start = layout["lang_start"]
+    lang_end = layout["lang_end"]
     if lang_end > lang_start:
         lang_attn = cross_attention[:, :, lang_start:lang_end].sum() / total_attn
     else:
         lang_attn = 0
 
     # State attention
+    state_idx = layout["state_idx"]
     state_attn = cross_attention[:, :, state_idx:].sum() / total_attn
 
     # Entropy (measure of focus vs diffusion)
-    # Average over heads, then compute entropy over prefix tokens
     attn_avg = cross_attention.mean(axis=0)  # [actions, prefix]
     attn_flat = attn_avg.flatten()
     attn_flat = attn_flat / (attn_flat.sum() + 1e-10)
     entropy = -np.sum(attn_flat * np.log(attn_flat + 1e-10))
 
-    return {
+    result = {
         "image_attention_ratio": float(image_attn),
         "language_attention_ratio": float(lang_attn),
         "state_attention_ratio": float(state_attn),
         "attention_entropy": float(entropy),
+        "layout": layout,
     }
+
+    # PER-CAMERA BREAKDOWN (if 3 cameras detected)
+    if layout["num_cameras"] == 3:
+        head_attn = cross_attention[:, :, layout["head_start"]:layout["head_end"]].sum() / total_attn
+        left_attn = cross_attention[:, :, layout["left_start"]:layout["left_end"]].sum() / total_attn
+        right_attn = cross_attention[:, :, layout["right_start"]:layout["right_end"]].sum() / total_attn
+
+        result["per_camera"] = {
+            "head_camera": float(head_attn),
+            "left_wrist": float(left_attn),
+            "right_wrist": float(right_attn),  # CRITICAL: Check if this is elevated in hallucination case
+        }
+
+        if debug:
+            print(f"    Per-camera attention: Head={head_attn:.3f}, Left={left_attn:.3f}, Right={right_attn:.3f}")
+
+    return result
+
+
+def map_attention_to_spatial_per_camera(
+    cross_attention: np.ndarray,
+    layout: dict,
+    debug: bool = False,
+) -> dict:
+    """
+    Map cross-attention to spatial heatmaps for each camera.
+
+    Args:
+        cross_attention: [heads, actions, prefix] or [batch, heads, actions, prefix]
+        layout: Token layout from infer_token_layout()
+
+    Returns:
+        dict with spatial attention maps per camera:
+        - 'head': np.ndarray [grid, grid]
+        - 'left_wrist': np.ndarray [grid, grid] (if 3 cameras)
+        - 'right_wrist': np.ndarray [grid, grid] (if 3 cameras)
+        - 'combined': np.ndarray (all image tokens combined)
+    """
+    if cross_attention.ndim == 4:
+        cross_attention = cross_attention[0]
+
+    grid_size = layout["grid_size"]
+    patches_per_camera = layout["patches_per_camera"]
+    target_size = grid_size * grid_size
+
+    result = {}
+
+    def extract_and_reshape(start, end):
+        """Extract attention slice and reshape to spatial grid."""
+        attn_slice = cross_attention[:, :, start:end]
+        attn_avg = attn_slice.mean(axis=(0, 1))  # Average over heads and actions
+
+        # Handle size mismatch
+        if len(attn_avg) >= target_size:
+            attn_to_reshape = attn_avg[:target_size]
+        else:
+            attn_to_reshape = np.pad(attn_avg, (0, target_size - len(attn_avg)))
+
+        spatial = attn_to_reshape.reshape(grid_size, grid_size)
+        # Normalize to [0, 1]
+        spatial = (spatial - spatial.min()) / (spatial.max() - spatial.min() + 1e-10)
+        return spatial
+
+    # Head camera (always present)
+    result["head"] = extract_and_reshape(layout["head_start"], layout["head_end"])
+
+    # Left and right wrist (if 3 cameras)
+    if layout["num_cameras"] == 3:
+        result["left_wrist"] = extract_and_reshape(layout["left_start"], layout["left_end"])
+        result["right_wrist"] = extract_and_reshape(layout["right_start"], layout["right_end"])
+
+    # Combined (all image tokens)
+    total_img_end = layout["total_image_tokens"]
+    attn_all_img = cross_attention[:, :, :total_img_end].mean(axis=(0, 1))
+    # For combined, try to make a reasonable grid
+    combined_grid = int(np.sqrt(len(attn_all_img)))
+    combined_target = combined_grid * combined_grid
+    if len(attn_all_img) >= combined_target:
+        combined_spatial = attn_all_img[:combined_target].reshape(combined_grid, combined_grid)
+    else:
+        combined_spatial = attn_all_img.reshape(-1, 1)  # Fallback to 1D
+    combined_spatial = (combined_spatial - combined_spatial.min()) / (combined_spatial.max() - combined_spatial.min() + 1e-10)
+    result["combined"] = combined_spatial
+
+    return result
 
 
 # ============================================================================
@@ -539,6 +761,141 @@ def plot_attention_metrics_over_time(
     plt.close()
 
 
+def plot_per_camera_attention(
+    step_data: dict[int, DenoiseStepAttention],
+    output_path: Path = None,
+    title: str = "Per-Camera Attention Breakdown",
+):
+    """
+    Plot per-camera attention breakdown over denoising steps.
+
+    CRITICAL: This visualization shows which camera receives attention.
+    If right_wrist attention is elevated in hallucination case, it may
+    indicate the banana in right wrist camera is triggering the behavior.
+    """
+    steps = sorted(step_data.keys())
+    if not steps:
+        return
+
+    # Check if per-camera data is available
+    has_per_camera = any(
+        step_data[s].per_camera is not None
+        for s in steps
+    )
+
+    if not has_per_camera:
+        print("  No per-camera attention data available (single camera mode)")
+        return
+
+    head_ratios = []
+    left_ratios = []
+    right_ratios = []
+
+    for s in steps:
+        if step_data[s].per_camera:
+            head_ratios.append(step_data[s].per_camera.head_camera)
+            left_ratios.append(step_data[s].per_camera.left_wrist)
+            right_ratios.append(step_data[s].per_camera.right_wrist)
+        else:
+            head_ratios.append(0)
+            left_ratios.append(0)
+            right_ratios.append(0)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Stacked area chart or line chart
+    ax.plot(steps, head_ratios, 'b-o', linewidth=2, markersize=6, label='Head Camera')
+    ax.plot(steps, left_ratios, 'g-o', linewidth=2, markersize=6, label='Left Wrist')
+    ax.plot(steps, right_ratios, 'r-o', linewidth=2, markersize=6, label='Right Wrist ⚠️')
+
+    ax.set_xlabel('Denoising Step', fontsize=12)
+    ax.set_ylabel('Attention Ratio', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_ylim(0, 0.6)
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    # Add annotation if right wrist is elevated
+    if right_ratios and max(right_ratios) > 0.25:
+        max_idx = right_ratios.index(max(right_ratios))
+        ax.annotate(
+            f'Right wrist elevated: {max(right_ratios):.1%}',
+            xy=(steps[max_idx], right_ratios[max_idx]),
+            xytext=(steps[max_idx] + 1, right_ratios[max_idx] + 0.05),
+            fontsize=10, color='red',
+            arrowprops=dict(arrowstyle='->', color='red'),
+        )
+
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"Saved per-camera attention: {output_path}")
+
+    plt.close()
+
+
+def plot_per_camera_spatial_heatmaps(
+    spatial_maps: dict,
+    images: dict = None,
+    output_path: Path = None,
+    title: str = "Spatial Attention Per Camera",
+):
+    """
+    Plot spatial attention heatmaps for each camera side-by-side.
+
+    Args:
+        spatial_maps: {'head': np.array, 'left_wrist': np.array, 'right_wrist': np.array}
+        images: Optional {'head': image, 'left_wrist': image, 'right_wrist': image}
+        output_path: Where to save
+        title: Plot title
+    """
+    num_cameras = len([k for k in spatial_maps.keys() if k != 'combined'])
+
+    if num_cameras == 1:
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        axes = [ax]
+        camera_keys = ['head']
+    else:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        camera_keys = ['head', 'left_wrist', 'right_wrist']
+
+    camera_labels = {
+        'head': 'Head Camera',
+        'left_wrist': 'Left Wrist Camera',
+        'right_wrist': 'Right Wrist Camera ⚠️',  # Highlight right wrist
+    }
+
+    for ax, cam_key in zip(axes, camera_keys):
+        if cam_key not in spatial_maps:
+            ax.text(0.5, 0.5, f"No data for {cam_key}", ha='center', va='center')
+            ax.axis('off')
+            continue
+
+        spatial_attn = spatial_maps[cam_key]
+
+        if images and cam_key in images and images[cam_key] is not None:
+            # Overlay on image
+            overlay = create_attention_heatmap_overlay(images[cam_key], spatial_attn, alpha=0.6)
+            ax.imshow(overlay)
+        else:
+            # Just show heatmap
+            im = ax.imshow(spatial_attn, cmap='hot', vmin=0, vmax=1)
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        ax.set_title(camera_labels.get(cam_key, cam_key), fontsize=12, fontweight='bold')
+        ax.axis('off')
+
+    plt.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"Saved per-camera spatial heatmaps: {output_path}")
+
+    plt.close()
+
+
 # ============================================================================
 # MAIN ANALYSIS FUNCTION
 # ============================================================================
@@ -646,8 +1003,12 @@ def analyze_case_cross_attention(
         left_wrist_img = cv2.cvtColor(cv2.imread(str(left_wrist_path)), cv2.COLOR_BGR2RGB)
         right_wrist_img = cv2.cvtColor(cv2.imread(str(right_wrist_path)), cv2.COLOR_BGR2RGB)
 
-        # Store image for this inference step
-        images_for_overlay[step_num] = head_img
+        # Store ALL camera images for this inference step (for per-camera heatmaps)
+        images_for_overlay[step_num] = {
+            'head': head_img,
+            'left_wrist': left_wrist_img,
+            'right_wrist': right_wrist_img,
+        }
 
         # Create observation
         state = np.zeros(12, dtype=np.float32)
@@ -702,9 +1063,28 @@ def analyze_case_cross_attention(
             if target_layer in layer_data:
                 attn = layer_data[target_layer].numpy()
 
-                # Compute spatial map and metrics
-                spatial_attn = map_attention_to_spatial(attn, debug=(denoise_step == 0 and step_num == steps_to_analyze[0]))
-                metrics = compute_attention_metrics(attn, debug=(denoise_step == 0 and step_num == steps_to_analyze[0]))
+                # Compute metrics WITH per-camera breakdown
+                is_first = (denoise_step == 0 and step_num == steps_to_analyze[0])
+                metrics = compute_attention_metrics(attn, debug=is_first)
+
+                # Compute per-camera spatial maps
+                layout = metrics.get("layout", {})
+                spatial_maps = map_attention_to_spatial_per_camera(attn, layout, debug=is_first)
+
+                # Use head camera spatial attention as the default
+                spatial_attn = spatial_maps.get("head", spatial_maps.get("combined"))
+
+                # Build per-camera attention dataclass if available
+                per_camera = None
+                if "per_camera" in metrics:
+                    per_camera = PerCameraAttention(
+                        head_camera=metrics["per_camera"]["head_camera"],
+                        left_wrist=metrics["per_camera"]["left_wrist"],
+                        right_wrist=metrics["per_camera"]["right_wrist"],
+                        head_spatial=spatial_maps.get("head"),
+                        left_wrist_spatial=spatial_maps.get("left_wrist"),
+                        right_wrist_spatial=spatial_maps.get("right_wrist"),
+                    )
 
                 # Estimate time from step (t = 1.0 - step * 0.1)
                 time = 1.0 - denoise_step * 0.1
@@ -717,10 +1097,15 @@ def analyze_case_cross_attention(
                     language_attention_ratio=metrics["language_attention_ratio"],
                     state_attention_ratio=metrics["state_attention_ratio"],
                     attention_entropy=metrics["attention_entropy"],
+                    per_camera=per_camera,
                     spatial_attention=spatial_attn,
                 )
 
                 all_step_data[step_num][denoise_step] = step_attention
+
+                # Print per-camera breakdown for first step
+                if is_first and per_camera:
+                    print(f"    Per-camera attention: Head={per_camera.head_camera:.1%}, Left={per_camera.left_wrist:.1%}, Right={per_camera.right_wrist:.1%}")
 
         print(f"    Captured {len(capture.attention_data)} denoising steps")
 
@@ -741,9 +1126,12 @@ def analyze_case_cross_attention(
 
     # Temporal evolution - use last inference step's denoising progression
     last_inf_step = max(all_step_data.keys())
+    last_images = images_for_overlay.get(last_inf_step, {})
+    head_image_for_overlay = last_images.get('head') if isinstance(last_images, dict) else last_images
+
     plot_temporal_evolution(
         all_step_data[last_inf_step],
-        images=[images_for_overlay.get(last_inf_step)],
+        images=[head_image_for_overlay],
         output_path=output_dir / "temporal_evolution.png",
         title=f"Cross-Attention Evolution (inf step {last_inf_step})\nTask: {task[:50]}...",
     )
@@ -754,6 +1142,30 @@ def analyze_case_cross_attention(
         output_path=output_dir / "attention_metrics.png",
     )
 
+    # NEW: Per-camera attention breakdown over denoising steps
+    plot_per_camera_attention(
+        all_step_data[last_inf_step],
+        output_path=output_dir / "per_camera_attention.png",
+        title=f"Per-Camera Attention (inf step {last_inf_step})\n⚠️ Check if Right Wrist is elevated in hallucination case",
+    )
+
+    # NEW: Per-camera spatial heatmaps for key denoising step (step 5 = middle)
+    mid_denoise_step = 5
+    if mid_denoise_step in all_step_data[last_inf_step]:
+        data = all_step_data[last_inf_step][mid_denoise_step]
+        if data.per_camera:
+            spatial_maps = {
+                'head': data.per_camera.head_spatial,
+                'left_wrist': data.per_camera.left_wrist_spatial,
+                'right_wrist': data.per_camera.right_wrist_spatial,
+            }
+            plot_per_camera_spatial_heatmaps(
+                spatial_maps,
+                images=last_images if isinstance(last_images, dict) else None,
+                output_path=output_dir / "per_camera_spatial_heatmaps.png",
+                title=f"Per-Camera Spatial Attention (inf {last_inf_step}, denoise {mid_denoise_step})",
+            )
+
     # Save individual spatial attention maps for ALL inference steps
     heatmaps_dir = output_dir / "heatmaps"
     heatmaps_dir.mkdir(exist_ok=True)
@@ -762,27 +1174,46 @@ def analyze_case_cross_attention(
         for denoise_step, data in denoise_dict.items():
             if data.spatial_attention is not None:
                 # Save raw spatial attention as .npy for quantitative analysis
-                # Format: inf{inference_step}_denoise{denoising_step}
                 np.save(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}_spatial.npy", data.spatial_attention)
 
+                # Save per-camera spatial maps if available
+                if data.per_camera:
+                    if data.per_camera.head_spatial is not None:
+                        np.save(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}_head.npy", data.per_camera.head_spatial)
+                    if data.per_camera.left_wrist_spatial is not None:
+                        np.save(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}_left_wrist.npy", data.per_camera.left_wrist_spatial)
+                    if data.per_camera.right_wrist_spatial is not None:
+                        np.save(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}_right_wrist.npy", data.per_camera.right_wrist_spatial)
+
+                # Generate overlay for head camera (backward compatible)
                 if inf_step in images_for_overlay:
-                    overlay = create_attention_heatmap_overlay(images_for_overlay[inf_step], data.spatial_attention)
+                    img_dict = images_for_overlay[inf_step]
+                    head_img = img_dict.get('head') if isinstance(img_dict, dict) else img_dict
+                    if head_img is not None:
+                        overlay = create_attention_heatmap_overlay(head_img, data.spatial_attention)
 
-                    fig, ax = plt.subplots(figsize=(8, 8))
-                    ax.imshow(overlay)
-                    ax.set_title(f"Inf {inf_step}, Denoise {denoise_step} (t={data.time:.1f})\n"
-                                f"Image: {data.image_attention_ratio:.2f}, "
-                                f"Lang: {data.language_attention_ratio:.2f}, "
-                                f"Entropy: {data.attention_entropy:.2f}")
-                    ax.axis('off')
-                    plt.savefig(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}.png", dpi=150, bbox_inches='tight')
-                    plt.close()
+                        fig, ax = plt.subplots(figsize=(8, 8))
+                        ax.imshow(overlay)
 
-    # Store in analysis with nested structure
+                        # Build title with per-camera info if available
+                        title_parts = [
+                            f"Inf {inf_step}, Denoise {denoise_step} (t={data.time:.1f})",
+                            f"Image: {data.image_attention_ratio:.2f}, Lang: {data.language_attention_ratio:.2f}",
+                        ]
+                        if data.per_camera:
+                            title_parts.append(f"Head: {data.per_camera.head_camera:.1%}, Left: {data.per_camera.left_wrist:.1%}, Right: {data.per_camera.right_wrist:.1%}")
+
+                        ax.set_title('\n'.join(title_parts), fontsize=9)
+                        ax.axis('off')
+                        plt.savefig(heatmaps_dir / f"inf_{inf_step:04d}_denoise_{denoise_step:02d}.png", dpi=150, bbox_inches='tight')
+                        plt.close()
+
+    # Store in analysis with nested structure (includes per-camera data)
     analysis_dict = {}
     for inf_step, denoise_dict in all_step_data.items():
-        analysis_dict[f"inf_{inf_step}"] = {
-            f"denoise_{denoise_step}": {
+        analysis_dict[f"inf_{inf_step}"] = {}
+        for denoise_step, data in denoise_dict.items():
+            step_dict = {
                 "step": data.step,
                 "time": data.time,
                 "layer_idx": data.layer_idx,
@@ -791,8 +1222,14 @@ def analyze_case_cross_attention(
                 "state_attention_ratio": data.state_attention_ratio,
                 "attention_entropy": data.attention_entropy,
             }
-            for denoise_step, data in denoise_dict.items()
-        }
+            # Add per-camera breakdown if available
+            if data.per_camera:
+                step_dict["per_camera"] = {
+                    "head_camera": data.per_camera.head_camera,
+                    "left_wrist": data.per_camera.left_wrist,
+                    "right_wrist": data.per_camera.right_wrist,
+                }
+            analysis_dict[f"inf_{inf_step}"][f"denoise_{denoise_step}"] = step_dict
 
     # Save analysis data
     analysis_data = {
@@ -812,8 +1249,10 @@ def analyze_case_cross_attention(
     print(f"\nAnalysis saved to: {output_dir}")
     print(f"  - temporal_evolution.png")
     print(f"  - attention_metrics.png")
-    print(f"  - heatmaps/")
-    print(f"  - cross_attention_analysis.json")
+    print(f"  - per_camera_attention.png  ← NEW: Check right wrist attention!")
+    print(f"  - per_camera_spatial_heatmaps.png  ← NEW: Side-by-side camera heatmaps")
+    print(f"  - heatmaps/ (with per-camera .npy files)")
+    print(f"  - cross_attention_analysis.json (with per_camera breakdown)")
 
     return analysis
 

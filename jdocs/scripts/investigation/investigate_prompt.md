@@ -16,3 +16,10 @@ python jdocs/scripts/investigation/tools/visualize_attention.py --compare --chec
   logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table --case2                                     
   logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj --output-dir                           
   logs/yogurt_banana_leftarm/attention_analysis 
+
+
+## multi-camera 
+
+python jdocs/scripts/investigation/tools/cross_attention_capture.py --case-dir logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table  --output-dir logs/yogurt_banana_leftarm/cross_attention_per_camera/halluc
+
+python jdocs/scripts/investigation/tools/cross_attention_capture.py --case-dir logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj --output-dir logs/yogurt_banana_leftarm/cross_attention_per_camera/normal

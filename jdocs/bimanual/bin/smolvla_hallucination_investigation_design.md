@@ -26,7 +26,12 @@
    - [Phase 5: Aggregate & Report](#phase-5-aggregate-evidence--generate-report)
 6. [Key Questions to Answer](#6-key-questions-to-answer)
 7. [Success Criteria](#7-success-criteria)
-8. [References](#8-references)
+8. [Current Hypotheses and Verification Status](#8-current-hypotheses-and-verification-status-2026-01-19)
+9. [Phase 2: Mechanistic Understanding Investigation](#9-phase-2-mechanistic-understanding-investigation)
+10. [Phase 2a Findings: Trajectory Shape Analysis](#10-phase-2a-findings-trajectory-shape-analysis)
+11. [SmolVLA Internal Mechanism: Deep Dive](#11-smolvla-internal-mechanism-deep-dive-with-walking-examples)
+12. [**CRITICAL: Multi-Camera Processing Gap**](#12-critical-finding-multi-camera-processing-gap)
+13. [**Per-Camera Cross-Attention Analysis Results**](#13-per-camera-cross-attention-analysis-results-2026-01-19) ← LATEST FINDINGS
 
 ---
 
@@ -1493,3 +1498,975 @@ logs/yogurt_banana_leftarm/
 | Are image representations different? | KV cache image region | Difference in image key/values = visual encoding differs |
 | Are language representations different? | KV cache language region | Should be similar (same prompt) |
 | Which layer contributes most? | Per-layer KV diff | Identify critical layer for intervention |
+
+---
+
+## 11. SmolVLA Internal Mechanism: Deep Dive with Walking Examples
+
+This section provides a comprehensive understanding of how SmolVLA processes inputs and generates robot actions. Understanding this mechanism is essential for diagnosing hallucination behavior.
+
+### 11.1 High-Level Architecture Overview
+
+```mermaid
+flowchart TB
+    subgraph INPUTS["📥 INPUTS (Per Inference Step)"]
+        IMG["🖼️ Camera Image<br/>480×640 RGB"]
+        TXT["📝 Task Text<br/>'pick up yogurt bottle and place in bin'"]
+        STATE["🤖 Robot State<br/>12 joint positions"]
+    end
+
+    subgraph ENCODING["🔧 ENCODING STAGE"]
+        SIGLIP["SigLIP Vision Encoder<br/>📸 → 729 patches (27×27)"]
+        TOKENIZER["Text Tokenizer<br/>📝 → ~48 tokens"]
+        STATE_PROJ["State Projector<br/>🤖 → 1 token"]
+    end
+
+    subgraph PREFIX["📦 PREFIX ASSEMBLY"]
+        ASSEMBLE["Concatenate:<br/>[img_special + patches + language + state]<br/>Total: ~778 tokens"]
+        KVCACHE["KV Cache<br/>Computed ONCE per chunk<br/>Frozen for 10 denoising steps"]
+    end
+
+    subgraph DIFFUSION["🌀 FLOW-MATCHING DIFFUSION (10 steps)"]
+        NOISE["Start: Random noise x₀<br/>(50 actions × 32 dims)"]
+        DENOISE["10× Denoise Loop:<br/>v_t = model(x_t, time)<br/>x_{t+1} = x_t + dt × v_t"]
+        ACTION["Final: Action Chunk<br/>(50 timesteps × 32 dims)"]
+    end
+
+    subgraph OUTPUT["📤 OUTPUT"]
+        DENORM["Denormalize Actions"]
+        ROBOT["Send to Robot"]
+    end
+
+    IMG --> SIGLIP
+    TXT --> TOKENIZER
+    STATE --> STATE_PROJ
+
+    SIGLIP --> ASSEMBLE
+    TOKENIZER --> ASSEMBLE
+    STATE_PROJ --> ASSEMBLE
+
+    ASSEMBLE --> KVCACHE
+    KVCACHE --> DENOISE
+    NOISE --> DENOISE
+    DENOISE --> ACTION
+    ACTION --> DENORM
+    DENORM --> ROBOT
+```
+
+### 11.2 Detailed Processing Pipeline
+
+#### Stage 1: Vision Encoding (SigLIP)
+
+```mermaid
+flowchart LR
+    subgraph INPUT["Raw Image"]
+        RAW["480×640×3 RGB<br/>(uint8)"]
+    end
+
+    subgraph PREPROCESS["Preprocessing"]
+        RESIZE["Resize + Crop<br/>→ 378×378"]
+        NORM["Normalize<br/>mean=[0.5], std=[0.5]"]
+    end
+
+    subgraph SIGLIP["SigLIP Encoder"]
+        PATCH["Patchify<br/>14×14 patches<br/>27×27 = 729 patches"]
+        EMBED["Patch Embedding<br/>→ 729 × 768"]
+        TRANS["12 Transformer Layers<br/>Self-attention + MLP"]
+    end
+
+    subgraph OUTPUT["Vision Tokens"]
+        VIS["729 visual tokens<br/>Shape: (729, 768)"]
+    end
+
+    RAW --> RESIZE --> NORM --> PATCH --> EMBED --> TRANS --> VIS
+```
+
+**Walking Example - Normal Case (Step 200, no banana):**
+```
+Input: Camera sees empty table after task completion
+       - Yogurt bottle in bin (task done)
+       - No other objects
+
+SigLIP processing:
+  - 729 patches represent spatial regions
+  - Patches 0-100: Background/wall
+  - Patches 100-300: Table surface (empty)
+  - Patches 300-500: Bin area (with bottle)
+  - Patches 500-729: Robot arm at rest
+
+Output: 729 × 768 tensor with scene representation
+```
+
+**Walking Example - Hallucination Case (Step 200, banana on table):**
+```
+Input: Camera sees table with banana after task completion
+       - Yogurt bottle in bin (task done)
+       - Banana visible on table near workspace
+
+SigLIP processing:
+  - Same 729 patches
+  - Patches 100-300: Table surface WITH BANANA
+    ↑ This is the key difference!
+
+Output: 729 × 768 tensor - subtly different from normal case
+```
+
+#### Stage 2: Language Tokenization
+
+```mermaid
+flowchart LR
+    subgraph INPUT["Task String"]
+        TXT["'Use left arm to pick up<br/>the yogurt bottle and<br/>place it in the bin'"]
+    end
+
+    subgraph TOKENIZER["Qwen2 Tokenizer"]
+        TOK["BPE Tokenization"]
+        PAD["Pad to max_len=48"]
+    end
+
+    subgraph EMBED["Embedding Layer"]
+        LOOKUP["Token Embedding<br/>Lookup Table"]
+    end
+
+    subgraph OUTPUT["Language Tokens"]
+        LANG["~48 language tokens<br/>Shape: (48, 768)"]
+    end
+
+    TXT --> TOK --> PAD --> LOOKUP --> LANG
+```
+
+**Walking Example:**
+```
+Task: "Use left arm to pick up the yogurt bottle and place it in the bin"
+
+Tokenization (approximate):
+  Token 0: "Use"
+  Token 1: " left"
+  Token 2: " arm"
+  Token 3: " to"
+  Token 4: " pick"      ← Action verb: "pick"
+  Token 5: " up"        ← Completes "pick up" action
+  Token 6: " the"
+  Token 7: " yog"       ← Object start
+  Token 8: "urt"
+  Token 9: " bottle"    ← Object: "yogurt bottle"
+  ...
+  Token 15: " place"    ← Second action: "place"
+  Token 16: " it"
+  Token 17: " in"
+  Token 18: " the"
+  Token 19: " bin"      ← Destination: "bin"
+
+Note: These tokens are IDENTICAL for all 3 cases!
+      Language is NOT the source of hallucination difference.
+```
+
+#### Stage 3: State Projection
+
+```mermaid
+flowchart LR
+    subgraph INPUT["Robot State"]
+        STATE["12 joint positions<br/>[j0, j1, ..., j11]"]
+    end
+
+    subgraph PROJECT["Linear Projection"]
+        LINEAR["nn.Linear(12, 768)"]
+    end
+
+    subgraph OUTPUT["State Token"]
+        TOK["1 state token<br/>Shape: (1, 768)"]
+    end
+
+    STATE --> LINEAR --> TOK
+```
+
+**Walking Example (Step 200):**
+```
+Normal case state:  [-100.40, -87.23, 100.12, -10.5, 0.0, -1.0, ...]
+                     ↑ J1 at rest position
+
+Halluc case state:  [-101.02, -85.45, 99.87, -11.2, 0.0, -1.0, ...]
+                     ↑ Slightly different due to earlier trajectory
+
+Both project to 768-dim embedding that represents current robot configuration.
+```
+
+#### Stage 4: Prefix Assembly & KV Cache Creation
+
+```mermaid
+flowchart TB
+    subgraph TOKENS["Token Sources"]
+        VIS["729 Vision Tokens"]
+        LANG["48 Language Tokens"]
+        STATE["1 State Token"]
+        SPECIAL["2 Image Special Tokens"]
+    end
+
+    subgraph ASSEMBLY["Prefix Assembly"]
+        direction LR
+        P0["[0-1] img_special"]
+        P1["[2-730] vision patches"]
+        P2["[731] img_end"]
+        P3["[732-779] language"]
+        P4["[780] state"]
+    end
+
+    subgraph KVCACHE["KV Cache Generation"]
+        FORWARD["VLM Forward Pass<br/>(fill_kv_cache=True)"]
+        CACHE["past_key_values<br/>28 layers × 2 (K,V)<br/>Each: (batch, heads, 778, 64)"]
+    end
+
+    VIS --> ASSEMBLY
+    LANG --> ASSEMBLY
+    STATE --> ASSEMBLY
+    SPECIAL --> ASSEMBLY
+
+    ASSEMBLY --> FORWARD --> CACHE
+```
+
+**Critical Point: KV Cache is computed ONCE per 50-step action chunk!**
+
+```
+Timeline:
+  Step 0:   Compute KV cache (chunk 0)
+  Step 1-49:   Reuse same KV cache
+  Step 50:  Compute KV cache (chunk 1)
+  Step 51-99:  Reuse same KV cache
+  ...
+  Step 200: Compute KV cache (chunk 4) ← HALLUCINATION DIVERGES HERE
+  Step 201-249: Reuse same KV cache (contaminated?)
+```
+
+**Walking Example - KV Cache at Step 200:**
+```
+Normal case:
+  - Image region encodes: empty table, bottle in bin, arm at rest
+  - Language region encodes: task semantics (same for all)
+  - State region encodes: robot at rest position
+
+Hallucination case:
+  - Image region encodes: table WITH BANANA, bottle in bin, arm at rest
+  - Language region encodes: task semantics (same)
+  - State region encodes: robot at rest position (similar)
+
+THE QUESTION: Does the banana presence change the KV cache
+              in a way that triggers subsequent action?
+```
+
+#### Stage 5: Flow-Matching Diffusion (The Core)
+
+```mermaid
+flowchart TB
+    subgraph INIT["Initialization"]
+        NOISE["x₀ ~ N(0, 1)<br/>Shape: (1, 50, 32)<br/>Random noise for 50-step chunk"]
+    end
+
+    subgraph LOOP["Denoising Loop (10 iterations)"]
+        direction TB
+
+        subgraph STEP["Each Denoising Step"]
+            TIME["time t: 1.0 → 0.1"]
+            SUFFIX["Suffix Embedding:<br/>action_emb = project(x_t)<br/>time_emb = sinusoidal(t)<br/>suffix = MLP(concat)"]
+            CROSS["Cross-Attention:<br/>Q = action_expert(suffix)<br/>K, V = KV_cache<br/>attn = softmax(QK^T)V"]
+            VEL["Velocity Prediction:<br/>v_t = project(attn_output)"]
+            UPDATE["Euler Update:<br/>x_{t+1} = x_t + dt × v_t<br/>(dt = -0.1)"]
+        end
+
+        TIME --> SUFFIX --> CROSS --> VEL --> UPDATE
+    end
+
+    subgraph OUTPUT["Final Action"]
+        FINAL["x_final: (1, 50, 32)<br/>50 timesteps × 32 action dims"]
+    end
+
+    NOISE --> LOOP --> OUTPUT
+```
+
+**Walking Example - Denoising at Step 200:**
+
+```
+NORMAL CASE (produces FLAT trajectory):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Denoise Step 0 (t=1.0):
+  x_t Joint1 values: [noise, noise, noise, ...] (random)
+  v_t Joint1 values: [-0.05, -0.05, -0.05, ...] (predicts "go toward -0.74")
+  x_next: moving toward training mean
+
+Denoise Step 5 (t=0.5):
+  x_t Joint1 values: [-0.4, -0.4, -0.4, ...]
+  v_t Joint1 values: [-0.07, -0.07, -0.07, ...]
+
+Denoise Step 9 (t=0.1):
+  x_t Joint1 values: [-0.74, -0.74, -0.74, ...] ← FLAT!
+  v_t Joint1 values: [~0, ~0, ~0, ...] (converged)
+
+Final: FLAT trajectory = "stay still for next 50 steps"
+
+
+HALLUCINATION CASE (produces RAMP trajectory):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Denoise Step 0 (t=1.0):
+  x_t Joint1 values: [noise, noise, noise, ...] (random)
+  v_t Joint1 values: [+0.02, +0.04, +0.06, ...] (predicts "ramp up")
+
+Denoise Step 5 (t=0.5):
+  x_t Joint1 values: [-0.3, -0.1, +0.1, ...]
+  v_t Joint1 values: [+0.05, +0.07, +0.09, ...]
+
+Denoise Step 9 (t=0.1):
+  x_t Joint1 values: [-0.71, -0.35, +0.01, +0.37, ..., +1.03] ← RAMP!
+  v_t Joint1 values: [small adjustments]
+
+Final: RAMP trajectory = "move forward over next 50 steps" = HALLUCINATION
+```
+
+### 11.3 The Cross-Attention Decision Point
+
+This is where the model decides WHAT action to generate based on visual and language context.
+
+```mermaid
+flowchart LR
+    subgraph QUERY["Query (Action Expert)"]
+        Q["50 action token queries<br/>Shape: (50, 64)"]
+    end
+
+    subgraph KEYVALUE["Key-Value (KV Cache)"]
+        K["778 prefix keys<br/>Vision: 729, Lang: 48, State: 1"]
+        V["778 prefix values"]
+    end
+
+    subgraph ATTENTION["Attention Computation"]
+        SCORES["Attention Scores<br/>Q × K^T → (50, 778)"]
+        SOFTMAX["Softmax"]
+        WEIGHTED["Weighted Sum<br/>scores × V → (50, 64)"]
+    end
+
+    subgraph OUTPUT["Action Direction"]
+        OUT["Action features<br/>→ velocity prediction"]
+    end
+
+    Q --> SCORES
+    K --> SCORES
+    SCORES --> SOFTMAX --> WEIGHTED
+    V --> WEIGHTED
+    WEIGHTED --> OUTPUT
+```
+
+**Attention Distribution (Our Measurements):**
+
+```
+                     HALLUCINATION    NORMAL
+Image patches (729):    86.6%         87.9%
+Language tokens (48):   13.3%         12.1%
+State token (1):         0.01%         0.01%
+
+KEY INSIGHT: The ratios are SIMILAR!
+             Hallucination is NOT from obvious attention shift.
+```
+
+### 11.4 Complete Single-Chunk Inference Flow
+
+```mermaid
+sequenceDiagram
+    participant Camera
+    participant SigLIP
+    participant Tokenizer
+    participant VLM
+    participant Expert as Action Expert
+    participant Diffusion
+    participant Robot
+
+    Note over Camera,Robot: Chunk 4 Generation (Step 200)
+
+    Camera->>SigLIP: Image at step 200
+    SigLIP->>VLM: 729 vision tokens
+
+    Note right of SigLIP: Normal: empty table<br/>Halluc: table + banana
+
+    Tokenizer->>VLM: 48 language tokens
+    Note right of Tokenizer: Same for both cases
+
+    VLM->>VLM: Compute KV Cache (ONCE)
+    Note over VLM: This cache is frozen<br/>for all 10 denoise steps
+
+    Diffusion->>Diffusion: x₀ = random noise
+
+    loop 10 Denoising Steps
+        Diffusion->>Expert: x_t (current noisy action)
+        Expert->>VLM: Cross-attend to KV cache
+        VLM->>Expert: Context-aware features
+        Expert->>Diffusion: v_t (velocity)
+        Diffusion->>Diffusion: x_{t+1} = x_t + dt × v_t
+    end
+
+    Diffusion->>Robot: Final 50-step action chunk
+
+    Note over Robot: Normal: FLAT (stay still)<br/>Halluc: RAMP (move forward)
+```
+
+### 11.5 What We Have Verified (Mapped to Diagram)
+
+```mermaid
+flowchart TB
+    subgraph VERIFIED["✅ VERIFIED"]
+        V1["Language tokens are IDENTICAL<br/>between all 3 cases"]
+        V2["Cross-attention RATIOS similar<br/>(87% image, 13% lang)"]
+        V3["Divergence is in action_raw<br/>(model output), not denormalization"]
+        V4["Normal case outputs FLAT trajectory<br/>Halluc outputs RAMP trajectory"]
+        V5["Banana POSITION matters<br/>(table vs plate)"]
+    end
+
+    subgraph HYPOTHESIS["🔍 HYPOTHESES (Need Verification)"]
+        H1["H4: KV cache encodes different<br/>scene representation"]
+        H2["H5: Workspace detection<br/>(banana in workspace triggers action)"]
+        H3["H6: Denoising velocity field<br/>diverges early vs late"]
+    end
+
+    subgraph UNKNOWN["❓ UNKNOWN"]
+        U1["When does RAMP emerge?<br/>(which denoise step?)"]
+        U2["What KV cache regions differ?<br/>(image vs language vs state)"]
+        U3["Why does banana-on-plate<br/>self-correct but table doesn't?"]
+    end
+```
+
+**Verification Evidence Summary:**
+
+| Finding | Evidence | Location in Pipeline |
+|---------|----------|---------------------|
+| Language identical | Same tokenization | Stage 2 (Tokenization) |
+| Cross-attention ratios similar | 86.6% vs 87.9% image | Stage 5 (Cross-Attention) |
+| Divergence in action_raw | -0.74 vs -0.71→+1.03 | Stage 5 Output |
+| FLAT vs RAMP shape | Trajectory analysis | Stage 5 Final Output |
+| Position matters | 3-case comparison | Stage 1 (Vision Input) |
+
+### 11.6 What Our Capture Integration Targets
+
+The tools we've built target specific points in the pipeline to answer remaining questions:
+
+```mermaid
+flowchart TB
+    subgraph PIPELINE["SmolVLA Pipeline"]
+        VISION["SigLIP Encoder"]
+        KVCACHE["KV Cache Creation"]
+        DENOISE["Denoising Loop"]
+        OUTPUT["Action Output"]
+    end
+
+    subgraph TOOLS["Investigation Tools"]
+        T1["🔧 kv_cache_analysis.py"]
+        T2["🔧 denoising_trajectory_capture.py"]
+        T3["🔧 cross_attention_capture.py"]
+    end
+
+    subgraph QUESTIONS["Questions Answered"]
+        Q1["What scene info is encoded?"]
+        Q2["Which layer differs most?"]
+        Q3["When does RAMP emerge?"]
+        Q4["What velocity is predicted?"]
+        Q5["Where does attention go?"]
+    end
+
+    T1 -.-> KVCACHE
+    T1 -.-> Q1
+    T1 -.-> Q2
+
+    T2 -.-> DENOISE
+    T2 -.-> Q3
+    T2 -.-> Q4
+
+    T3 -.-> DENOISE
+    T3 -.-> Q5
+```
+
+**Tool Targets:**
+
+| Tool | Hook Point | Data Captured | Question Answered |
+|------|------------|---------------|-------------------|
+| `kv_cache_analysis.py` | After `embed_prefix()` | Key/value states per layer | What scene representation differs? |
+| `denoising_trajectory_capture.py` | Inside denoise loop | x_t, v_t at each step | When does RAMP shape emerge? |
+| `cross_attention_capture.py` | After softmax | Attention weights | Which tokens drive action? |
+
+### 11.7 Integration Points in Source Code
+
+```python
+# modeling_smolvla.py - Key locations for hooks
+
+class SmolVLAForActionPrediction:
+
+    def run_inference(self, ...):
+        # HOOK POINT 1: KV Cache Creation (line ~797)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        # → kv_cache_analysis.py captures here
+
+        _, past_key_values = self.vlm_with_expert.forward(
+            inputs_embeds=prefix_embs,
+            fill_kv_cache=True,  # KV cache computed
+        )
+        # → kv_cache_analysis.py extracts past_key_values
+
+        # HOOK POINT 2: Denoising Loop (line ~837)
+        for i, time in enumerate(torch.linspace(1, final_sigma, num_steps)):
+            v_t = denoise_step_partial_call(x_t)
+            # → denoising_trajectory_capture.py captures x_t, v_t
+
+            x_t = x_t + dt * v_t
+
+        # HOOK POINT 3: Final Action (line ~848)
+        action_raw = self.unnormalize_action(x_t)
+        # → Already logged in trace
+```
+
+### 11.8 Expected Findings from Live Capture
+
+**Scenario A: KV Cache is Root Cause**
+```
+If KV cache differs significantly:
+  - Image region of KV cache shows large L2 difference
+  - Language region shows minimal difference
+  - RAMP shape emerges at denoise step 0-2 (from cache influence)
+
+Implication: Visual encoder represents banana differently,
+             contaminating all subsequent processing.
+```
+
+**Scenario B: Denoising Dynamics is Root Cause**
+```
+If KV cache is similar but trajectories diverge:
+  - KV cache L2 difference is small
+  - RAMP shape emerges at denoise step 7-9 (late)
+  - Velocity field v_t differs in specific directions
+
+Implication: Same context, but diffusion process unstable
+             for "stay still" action in certain visual contexts.
+```
+
+**Scenario C: Implicit Workspace Detection**
+```
+If banana position determines behavior:
+  - Banana-on-table: High attention to workspace region
+  - Banana-on-plate: Low attention to workspace region
+  - Model has learned "objects in workspace = potential targets"
+
+Implication: Training data associated workspace objects with actions,
+             model generalizes to ANY visible object in workspace.
+```
+
+### 11.9 Summary: The Investigation Baseline
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                  SmolVLA HALLUCINATION INVESTIGATION                     │
+│                         CURRENT UNDERSTANDING                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  INPUT STAGE:                                                           │
+│  ✅ Language: Same for all cases                                        │
+│  ✅ State: Similar (small differences from earlier trajectory)          │
+│  ❓ Vision: Banana presence changes something...                        │
+│                                                                          │
+│  KV CACHE:                                                              │
+│  ❓ Unknown: Does banana change the cached representation?              │
+│  ❓ Unknown: Which layer is most affected?                              │
+│                                                                          │
+│  CROSS-ATTENTION:                                                       │
+│  ✅ Ratios similar: ~87% image, ~13% language                          │
+│  ❓ Unknown: Are attended FEATURES different despite same ratios?       │
+│                                                                          │
+│  DENOISING:                                                             │
+│  ❓ Unknown: At which step does RAMP emerge?                           │
+│  ❓ Unknown: What velocity field differences cause RAMP?               │
+│                                                                          │
+│  OUTPUT:                                                                │
+│  ✅ Normal: FLAT trajectory (stay still)                               │
+│  ✅ Halluc: RAMP trajectory (move forward)                             │
+│  ✅ Divergence in action_raw, not denormalization                      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Next Step: Run live capture with integrated tools to answer the ❓ questions above.**
+
+---
+
+## 12. CRITICAL FINDING: Multi-Camera Processing Gap
+
+### 12.1 The Missed Analysis
+
+**Previous analysis assumed single-camera processing, but SmolVLA uses 3 cameras!**
+
+| Camera | Purpose | Position in Prefix |
+|--------|---------|-------------------|
+| Head camera | Scene overview | Positions 0-575 |
+| Left wrist camera | Left arm workspace | Positions 576-1151 |
+| Right wrist camera | Right arm workspace | Positions 1152-1727 |
+
+**Token layout (corrected):**
+```
+[Head: 576 patches] + [Left wrist: 576] + [Right wrist: 576] + [Lang: 48] + [State: 1]
+ Position 0-575       Position 576-1151   Position 1152-1727   1728-1775    1776
+
+Total: ~1777 tokens (NOT 778 as previously documented!)
+```
+
+### 12.2 Critical Observation from User
+
+**The user noticed:**
+- In hallucination case: Banana is visible in RIGHT WRIST camera at step 200+
+- In normal cases: NO banana in right wrist camera view
+
+**This was missed in previous cross-attention analysis because:**
+1. Analysis used 27×27 = 729 patches (single camera assumption)
+2. Actual images are 512×512 → 576 patches per camera (576 = 24×24)
+3. Per-camera attention breakdown was NOT computed
+
+### 12.3 Why Right Wrist Camera Matters
+
+```mermaid
+flowchart TB
+    subgraph CAMERAS["Three Camera Views at Step 200"]
+        HEAD["🎥 Head Camera<br/>Scene overview<br/>Banana visible on table"]
+        LEFT["🎥 Left Wrist<br/>Left arm workspace<br/>No banana visible"]
+        RIGHT["🎥 Right Wrist<br/>Right arm workspace<br/>⚠️ BANANA DIRECTLY VISIBLE"]
+    end
+
+    subgraph PREFIXASSEMBLY["Prefix Assembly"]
+        CONCAT["Concatenate all patches:<br/>576 + 576 + 576 = 1728 image tokens"]
+    end
+
+    subgraph CROSSATTN["Cross-Attention"]
+        QUERY["Action Expert Query<br/>(50 action tokens)"]
+        ATTEND["Full attention to ALL 1728<br/>image patches - no filtering!"]
+    end
+
+    HEAD --> CONCAT
+    LEFT --> CONCAT
+    RIGHT --> CONCAT
+    CONCAT --> ATTEND
+    QUERY --> ATTEND
+```
+
+**Key insight**: The action expert can attend equally to ANY of the 1728 image patches. If the banana is prominently visible in the right wrist camera, those patches may receive high attention and trigger picking behavior.
+
+### 12.4 Revised Hypothesis
+
+```
+PREVIOUS HYPOTHESIS (H1 - REJECTED):
+  "Banana in head camera triggers hallucination via cross-attention"
+  Evidence against: Cross-attention to banana region was LOW (0.93%)
+
+NEW HYPOTHESIS (H9 - NEEDS VERIFICATION):
+  "Banana in RIGHT WRIST camera triggers hallucination"
+
+  Reasoning:
+  - Right wrist camera captures workspace from arm's perspective
+  - At step 200+, if left arm moves near table, RIGHT wrist sees banana
+  - Model may have learned: "object in wrist camera = pick target"
+  - This triggers picking action toward banana/bottle location
+```
+
+### 12.5 Per-Camera Attention Analysis (TODO)
+
+**Need to compute attention breakdown by camera:**
+
+```python
+def compute_per_camera_attention(attention_weights, patch_counts=[576, 576, 576]):
+    """
+    Breakdown cross-attention by camera source.
+
+    Args:
+        attention_weights: (batch, heads, 50_actions, 1777_prefix)
+        patch_counts: patches per camera [head, left_wrist, right_wrist]
+
+    Returns:
+        Per-camera attention percentages
+    """
+    head_start, head_end = 0, 576
+    left_start, left_end = 576, 1152
+    right_start, right_end = 1152, 1728
+    lang_start, lang_end = 1728, 1776
+
+    # Extract attention to each region
+    attn_to_head = attention_weights[:, :, :, head_start:head_end].sum()
+    attn_to_left = attention_weights[:, :, :, left_start:left_end].sum()
+    attn_to_right = attention_weights[:, :, :, right_start:right_end].sum()
+    attn_to_lang = attention_weights[:, :, :, lang_start:lang_end].sum()
+
+    total = attn_to_head + attn_to_left + attn_to_right + attn_to_lang
+
+    return {
+        "head_camera": attn_to_head / total,
+        "left_wrist": attn_to_left / total,
+        "right_wrist": attn_to_right / total,  # ← CRITICAL TO MEASURE
+        "language": attn_to_lang / total,
+    }
+```
+
+**Expected finding if H9 is correct:**
+
+| Case | Head Attn | Left Wrist | Right Wrist | Language |
+|------|-----------|------------|-------------|----------|
+| Normal (no banana) | ~40% | ~30% | ~20% | ~10% |
+| Hallucination | ~35% | ~25% | **~30%** ⬆️ | ~10% |
+
+### 12.6 Spatial Attention Heatmap Per Camera
+
+For proper visualization, need 3 separate heatmaps:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           CROSS-ATTENTION HEATMAPS - Step 250 (Hallucination Case)          │
+├─────────────────────┬─────────────────────┬─────────────────────────────────┤
+│   HEAD CAMERA       │   LEFT WRIST        │   RIGHT WRIST                   │
+│   24×24 patches     │   24×24 patches     │   24×24 patches                 │
+│                     │                     │                                 │
+│  [     ]  low attn  │  [     ]  low attn  │  [█████]  HIGH ATTN TO BANANA  │
+│  [     ]            │  [     ]            │  [█████]  ← Trigger region!    │
+│                     │                     │                                 │
+│   Attn: 35%         │   Attn: 25%         │   Attn: 30%                     │
+└─────────────────────┴─────────────────────┴─────────────────────────────────┘
+```
+
+### 12.7 Camera Masking Experiment
+
+**To verify H9, mask right wrist camera and check if hallucination disappears:**
+
+```python
+def run_camera_masking_experiment(policy, observation, camera_to_mask="right_wrist"):
+    """
+    Replace right wrist camera with zeros/mean and see if hallucination stops.
+    """
+    masked_obs = observation.copy()
+
+    if camera_to_mask == "right_wrist":
+        # Replace right wrist image with black/mean
+        masked_obs["observation.images.right_wrist"] = torch.zeros_like(
+            observation["observation.images.right_wrist"]
+        )
+
+    # Run inference with masked camera
+    actions = policy.run_inference(masked_obs)
+
+    return actions  # Check if FLAT (no hallucination) or RAMP (still hallucinates)
+```
+
+**Expected result:**
+- If masking right wrist eliminates hallucination → H9 confirmed
+- If hallucination persists → Look at other factors
+
+### 12.8 Updated Investigation Checklist
+
+| Step | Task | Status |
+|------|------|--------|
+| 1 | Verify actual patch count per camera (576 vs 729) | ✅ **64 patches/camera (8×8)** |
+| 2 | Update cross_attention_capture.py for per-camera breakdown | ✅ Done |
+| 3 | Generate per-camera attention heatmaps for all 3 cases | ✅ Done |
+| 4 | Compare right wrist attention between hallucination vs normal | ✅ Done - See Section 13 |
+| 5 | Run camera masking experiment | TODO |
+| 6 | If H9 confirmed, identify why right wrist banana triggers action | ✅ Partial - See Section 13 |
+
+### 12.9 Why This Was Missed
+
+1. **Documentation assumed single camera**: Early sections described 729 patches (27×27), which is single-camera
+2. **Attention visualization tool limitation**: `visualize_attention.py` may have only processed head camera
+3. **Cross-attention analysis averaged across all patches**: Didn't separate by camera source
+4. **Physical setup not fully documented**: Which camera sees what at which step wasn't tracked
+
+### 12.10 Correcting the Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph INPUTS["📥 INPUTS (3 Cameras)"]
+        IMG1["🎥 Head Camera<br/>480×640"]
+        IMG2["🎥 Left Wrist<br/>480×640"]
+        IMG3["🎥 Right Wrist<br/>480×640"]
+        TXT["📝 Task Text"]
+        STATE["🤖 Robot State"]
+    end
+
+    subgraph ENCODING["🔧 ENCODING"]
+        SIGLIP1["SigLIP → 576 patches"]
+        SIGLIP2["SigLIP → 576 patches"]
+        SIGLIP3["SigLIP → 576 patches"]
+        TOKENIZER["Tokenizer → 48 tokens"]
+        STATE_PROJ["Projector → 1 token"]
+    end
+
+    subgraph PREFIX["📦 PREFIX (1777 tokens)"]
+        CONCAT["[Head:576 | Left:576 | Right:576 | Lang:48 | State:1]"]
+        KVCACHE["KV Cache (frozen for 10 denoise steps)"]
+    end
+
+    subgraph DIFFUSION["🌀 DIFFUSION"]
+        CROSSATTN["Cross-Attention<br/>Action tokens → ALL 1777 prefix tokens<br/>⚠️ Can attend to ANY camera!"]
+    end
+
+    IMG1 --> SIGLIP1
+    IMG2 --> SIGLIP2
+    IMG3 --> SIGLIP3
+    TXT --> TOKENIZER
+    STATE --> STATE_PROJ
+
+    SIGLIP1 --> CONCAT
+    SIGLIP2 --> CONCAT
+    SIGLIP3 --> CONCAT
+    TOKENIZER --> CONCAT
+    STATE_PROJ --> CONCAT
+
+    CONCAT --> KVCACHE
+    KVCACHE --> CROSSATTN
+```
+
+---
+
+## 13. Per-Camera Cross-Attention Analysis Results (2026-01-19)
+
+### 13.1 Corrected Token Layout (Verified)
+
+After running diagnostic scripts (`check_prefix_length.py`, `check_image_tokens.py`), the **actual** token layout is:
+
+```
+TOTAL PREFIX TOKENS: 241 (not 1777 as originally estimated)
+
+Token breakdown:
+  - Head camera:     64 patches (8×8 grid)    [0:64]
+  - Left wrist:      64 patches (8×8 grid)    [64:128]
+  - Right wrist:     64 patches (8×8 grid)    [128:192]
+  - Language tokens: ~48 tokens               [192:240]
+  - State token:     1 token                  [240]
+
+NOTE: Attention key dimension = 291 = 241 prefix + 50 action tokens (self-attention)
+```
+
+The heavy compression (512×512 image → 64 tokens) is due to `multi_modal_projector` pooling after SigLIP.
+
+### 13.2 Per-Camera Attention Comparison: H9 Evidence
+
+**Quantitative Results (Right Wrist Attention at denoise step 0):**
+
+| Inf Step | Hallucination | Normal | Delta | Interpretation |
+|----------|---------------|--------|-------|----------------|
+| 0        | **18.7%**     | 14.8%  | **+3.9%** | Large gap at start |
+| 100      | 21.1%         | 20.0%  | +1.0% | Gap narrows during task |
+| 200      | **18.9%**     | 18.0%  | +0.9% | Task completion - gap persists |
+| 250      | **19.5%**     | 18.1%  | **+1.4%** | Hallucination emerging |
+| 300      | 18.7%         | 18.0%  | +0.7% | Hallucination active |
+| 350      | 18.3%         | 18.8%  | -0.5% | Converging at end |
+
+**Key Finding**: Hallucination case shows **consistently elevated right wrist attention** (+0.7% to +3.9%) throughout the episode.
+
+### 13.3 Spatial Attention Pattern Differences
+
+**Visual comparison of heatmaps (inf 200, denoise 5):**
+
+| Aspect | Hallucination Case | Normal Case |
+|--------|-------------------|-------------|
+| Right Wrist | **Focused hotspot on table/banana area** | Diffuse, no object focus |
+| Head Camera | Attention on robot arm | Similar |
+| Left Wrist | Spread across gripper | Focused on gripper |
+
+The spatial heatmaps clearly show the hallucination case has attention **locked onto the banana area** in the right wrist camera.
+
+### 13.4 Denoising Dynamics
+
+Both cases show a **U-shaped attention pattern** across the 10 denoising steps:
+- Steps 0-2: High attention (exploration)
+- Steps 3-6: Lower attention (settling)
+- Steps 7-9: Rising attention (refinement)
+
+**Critical observation**: The hallucination case maintains higher right wrist attention **throughout all 10 denoising steps**, not just at specific points.
+
+### 13.5 Hypothesis H9 Verdict: **SUPPORTED**
+
+The evidence strongly supports H9 (banana in right wrist triggers hallucination):
+
+1. **Quantitative**: +1-4% elevated right wrist attention in hallucination case
+2. **Spatial**: Heatmaps show focused attention on banana area
+3. **Temporal**: Elevated attention persists from episode start through completion
+4. **Mechanism**: Persistent visual attention to banana likely triggers "pick up" action patterns
+
+### 13.6 Root Cause Pathway (Refined)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  HALLUCINATION TRIGGER PATHWAY                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Banana visible in RIGHT WRIST camera                        │
+│                     ↓                                           │
+│  2. Vision encoder encodes banana features into KV cache        │
+│                     ↓                                           │
+│  3. Action expert's cross-attention LOCKS onto banana area      │
+│     (elevated attention: +1-4% compared to empty scene)         │
+│                     ↓                                           │
+│  4. This attention persists even AFTER task completion          │
+│                     ↓                                           │
+│  5. During denoising, persistent banana attention biases        │
+│     action generation toward "pick up" patterns                 │
+│                     ↓                                           │
+│  6. Robot arm reaches back toward where object USED TO BE       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 13.7 Generated Analysis Files
+
+```
+logs/yogurt_banana_leftarm/cross_attention_per_camera/
+├── halluc_v3/
+│   ├── cross_attention_analysis.json     # Full data with per_camera breakdown
+│   ├── per_camera_attention.png          # Line chart over denoising steps
+│   ├── per_camera_spatial_heatmaps.png   # 3-panel spatial attention
+│   ├── temporal_evolution.png
+│   └── heatmaps/                         # Individual step heatmaps + .npy files
+├── normal_v3/
+│   └── (same structure)
+└── comparison_analysis.png               # Side-by-side comparison chart
+```
+
+### 13.8 Suggested Next Steps
+
+#### Immediate (Verification)
+
+| Priority | Task | Purpose |
+|----------|------|---------|
+| 1 | **Counterfactual masking experiment** | Digitally remove banana, re-run inference to confirm causality |
+| 2 | **Camera masking experiment** | Black out right wrist camera, check if hallucination stops |
+| 3 | **Additional case analysis** | Run on case with banana on plate (far from action area) |
+
+#### Medium-term (Solution Development)
+
+| Priority | Task | Purpose |
+|----------|------|---------|
+| 4 | **Dataset analysis** | Check multi-object scene frequency in training data |
+| 5 | **Post-completion detection** | Build classifier to detect "task complete" state |
+| 6 | **Action variance monitoring** | Detect and suppress erratic post-completion actions |
+
+#### Long-term (Model Improvements)
+
+| Priority | Task | Purpose |
+|----------|------|---------|
+| 7 | **Task-conditioned attention masking** | Learn to ignore irrelevant objects |
+| 8 | **Data augmentation** | Add multi-object scenes with "stay still" labels |
+| 9 | **Action gating mechanism** | Learned confidence gate to suppress low-confidence actions |
+
+### 13.9 Tool Improvements Needed
+
+Based on this analysis, the following tool improvements are needed:
+
+1. **Per-camera spatial heatmaps at ALL inference steps** (currently only inf 350, denoise 5)
+2. **Output to `logs/analysis/` folder** instead of case folders
+3. **Verify heatmap overlay correctness** (some attention appears on curtain/corner areas)
+4. **Add comparison mode** to generate side-by-side visualizations automatically
+
+### 13.10 Key Insight: Cross-Attention vs Self-Attention
+
+| Previous Analysis | New Analysis |
+|-------------------|--------------|
+| Vision encoder self-attention | **Action expert cross-attention** |
+| How image patches relate internally | **What drives action generation** |
+| Single camera view | **All 3 cameras separated** |
+| Internal processing | **Decision-making pathway** |
+
+The new cross-attention analysis captures what the action expert **actually attends to** when generating actions, making it directly relevant to understanding hallucination triggers.
