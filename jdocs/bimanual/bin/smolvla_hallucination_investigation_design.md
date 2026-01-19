@@ -157,16 +157,137 @@ jointly with action generation.
 ## 4. Tools Overview
 
 All tools are located in `jdocs/scripts/investigation/tools/`.
-Output goes to `logs/investigation/` (cases, reports).
+Output goes to `logs/` (cases and analysis results).
 
-| Tool | Purpose | Key Output |
-|------|---------|------------|
-| `trace_inference.py` | Capture detailed inference traces | `trace.jsonl`, images |
-| `analyze_denoising.py` | Visualize denoising process | Trajectory plots, velocity analysis |
-| `visualize_attention.py` | Attention heatmaps and analysis | Spatial attention maps |
-| `analyze_dataset.py` | Training data distribution analysis | `report.md`, distribution plots |
-| `run_ablation.py` | Systematic ablation experiments | Experiment results |
-| `aggregate_evidence.py` | Synthesize all findings | Final investigation report |
+### Tool Status
+
+| Tool | Purpose | Status | Key Output |
+|------|---------|--------|------------|
+| `trace_inference.py` | Capture detailed inference traces | **DONE** | `trace.jsonl`, images |
+| `visualize_attention.py` | Vision encoder self-attention | **DONE** (insufficient) | Spatial attention maps |
+| `cross_attention_capture.py` | **Action expert → VLM cross-attention** | **NEXT** | Denoising-step attention |
+| `distractor_attention.py` | Quantify distractor attention | **NEXT** | Attention ratio metrics |
+| `counterfactual_masking.py` | Object removal experiments | **NEXT** | Causal analysis |
+| `analyze_denoising.py` | Visualize denoising process | Planned | Trajectory plots |
+| `analyze_dataset.py` | Training data distribution | Planned | Distribution reports |
+
+### Critical Finding: Why Self-Attention is Insufficient
+
+**Problem**: Our initial `visualize_attention.py` captured **vision encoder self-attention** (how image patches attend to each other). The heatmaps looked similar between hallucination and normal cases because:
+
+1. Vision encoder self-attention shows internal image processing
+2. But the **action expert uses cross-attention** to query VLM embeddings
+3. The real question is: **What does the action expert attend to when generating actions?**
+
+**Solution**: Capture **cross-attention** at `smolvlm_with_expert.py:575` where the action expert queries the VLM prefix (image + language + state tokens).
+
+---
+
+## 4.1 Cross-Attention Analysis (NEW - CRITICAL)
+
+### Why Cross-Attention Matters
+
+```
+Vision Encoder Self-Attention (INSUFFICIENT):
+  Image Patches ←→ Image Patches (internal feature extraction)
+
+Action Expert Cross-Attention (WHAT WE NEED):
+  Action Tokens → [Image Patches + Language Tokens + State]
+                   ↑
+                   This shows what drives action generation
+```
+
+### Token Layout in VLM Prefix
+
+The action expert attends to ~778 tokens in the VLM prefix:
+
+```
+Index Range    Token Type           Count    Notes
+─────────────────────────────────────────────────────
+[0-1]          Image special        2        <image_start>, global
+[2-730]        Image patches        729      27×27 grid from SigLIP
+[731]          Image end            1        <image_end>
+[732-779]      Language tokens      ~48      Task description
+[780]          State token          1        Robot joint state
+```
+
+### Cross-Attention Capture Hook
+
+**File**: `jdocs/scripts/investigation/tools/cross_attention_capture.py`
+
+**Hook location**: `smolvlm_with_expert.py:575` (after softmax in `eager_attention_forward`)
+
+```python
+# Captured attention shape: [batch, num_heads, 50_action_tokens, 778_prefix_tokens]
+probs = nn.functional.softmax(masked_att_weights, dim=-1)
+# ↑ Hook here to capture probs
+
+# Map to spatial: extract attention to image patches (indices 2:731)
+attn_to_image = probs[:, :, :, 2:731]  # [batch, heads, 50, 729]
+spatial_attention = attn_to_image.mean(dim=2).reshape(-1, 27, 27)
+```
+
+### Temporal Evolution (10 Denoising Steps)
+
+**Key insight**: Track attention across all 10 denoising steps to see WHEN hallucination emerges.
+
+```
+Step 0 (t=1.0): Initial noise → first action direction
+Step 1-3:       Primary trajectory emerges
+Step 4-6:       Trajectory refinement
+Step 7-9:       Fine details + potential distractor influence
+Step 9 (t=0.1): Final action output
+```
+
+**Hypothesis**: If distractor attention ratio increases in steps 7-9, hallucination emerges in late denoising.
+
+### Distractor Attention Metrics
+
+**File**: `jdocs/scripts/investigation/tools/distractor_attention.py`
+
+```python
+def compute_distractor_attention_ratio(spatial_attention, distractor_bbox):
+    """
+    Args:
+        spatial_attention: [27, 27] attention map over image patches
+        distractor_bbox: (x1, y1, x2, y2) in pixel coordinates
+
+    Returns:
+        ratio: 0.0-1.0 (fraction of attention to distractor region)
+    """
+    distractor_mask = create_patch_mask(distractor_bbox, grid=(27, 27))
+    return (spatial_attention * distractor_mask).sum() / spatial_attention.sum()
+```
+
+**Success criteria**:
+- Hallucination case: distractor attention ratio **increases** in steps 7-9
+- Normal case: distractor attention ratio **stable/decreasing**
+
+### Counterfactual Masking
+
+**File**: `jdocs/scripts/investigation/tools/counterfactual_masking.py`
+
+**Purpose**: Prove causality by removing distractor and re-running inference.
+
+```python
+def run_counterfactual_analysis(policy, observation, distractor_bbox):
+    # Run with original image
+    original_actions, original_attention = run_with_capture(observation)
+
+    # Mask distractor (fill with image mean)
+    masked_image = apply_object_mask(observation["image"], distractor_bbox, fill="mean")
+
+    # Run with masked image
+    masked_actions, masked_attention = run_with_capture(masked_observation)
+
+    # Compare
+    return {
+        "action_delta": original_actions - masked_actions,  # Should be large if distractor caused hallucination
+        "attention_delta": original_attention - masked_attention,
+    }
+```
+
+**Expected result**: If masking banana eliminates hallucination → confirms visual distractor is root cause.
 
 ---
 
@@ -300,49 +421,90 @@ cat ../../../../logs/investigation/reports/dataset_analysis/report.md
 
 ---
 
-### Phase 3: Model Introspection
+### Phase 3: Model Introspection (UPDATED)
 
 **Goal**: Understand what the model "sees" and where attention goes.
 
-#### Step 3.1: Analyze Denoising Process
+#### Step 3.1: Cross-Attention Analysis (NEW - PRIORITY)
 
-If you have a hallucination case with captured images:
-
-```bash
-# First, run inference and capture denoising data
-# (Note: This requires modifying the inference to save denoising traces)
-
-# Then visualize existing trace
-python analyze_denoising.py \
-    --trace-file ../../../../logs/investigation/cases/hallucination/case_001_banana_present/denoising_trace.json \
-    --output-dir ../../../../logs/investigation/reports/denoising_analysis
-```
-
-#### Step 3.2: Compare Denoising Between Cases
+**This is the most important diagnostic tool.** It captures what the action expert attends to during action generation.
 
 ```bash
-python analyze_denoising.py \
-    --compare \
-    --case1 ../../../../logs/investigation/cases/hallucination/case_001_banana_present \
-    --case2 ../../../../logs/investigation/cases/normal/case_001_no_distractor \
-    --output-dir ../../../../logs/investigation/reports/denoising_comparison
+# Analyze hallucination case
+python cross_attention_capture.py \
+    --case-dir ../../../../logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --output-dir ../../../../logs/yogurt_banana_leftarm/cross_attention_analysis/case1
+
+# Analyze normal case for comparison
+python cross_attention_capture.py \
+    --case-dir ../../../../logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
+    --output-dir ../../../../logs/yogurt_banana_leftarm/cross_attention_analysis/case3
 ```
 
-#### Step 3.3: Attention Visualization
+**Output**:
+- `temporal_evolution.png`: 10-panel showing attention at each denoising step
+- `distractor_ratio_plot.png`: Line graph of distractor attention over time
+- `cross_attention_data.json`: Raw attention data for further analysis
+
+#### Step 3.2: Distractor Attention Quantification
+
+```bash
+# Quantify attention to distractor region (requires bounding box)
+python distractor_attention.py \
+    --cross-attention-dir ../../../../logs/yogurt_banana_leftarm/cross_attention_analysis/case1 \
+    --distractor-bbox 100,200,180,280 \
+    --output-dir ../../../../logs/yogurt_banana_leftarm/distractor_analysis
+```
+
+**What to look for**:
+- Distractor attention ratio should be < 0.15 for normal behavior
+- Ratio > 0.20 indicates significant distractor attention
+- Increasing ratio across denoising steps = hallucination emerging
+
+#### Step 3.3: Counterfactual Masking (Causal Analysis)
+
+```bash
+# Prove causality by masking distractor and re-running inference
+python counterfactual_masking.py \
+    --case-dir ../../../../logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --distractor-bbox 100,200,180,280 \
+    --output-dir ../../../../logs/yogurt_banana_leftarm/counterfactual
+```
+
+**Expected output**:
+- If masking banana eliminates hallucination → confirms visual distractor is root cause
+- Large `action_delta` in X,Y coordinates indicates distractor was driving motion
+
+#### Step 3.4: Vision Encoder Self-Attention (SUPPLEMENTARY)
+
+This captures internal image processing but is less useful for root cause analysis.
 
 ```bash
 python visualize_attention.py \
     --checkpoint $CHECKPOINT \
-    --case-dir ../../../../logs/investigation/cases/hallucination/case_001_banana_present \
-    --output-dir ../../../../logs/investigation/reports/attention_analysis
+    --case-dir ../../../../logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --output-dir ../../../../logs/yogurt_banana_leftarm/attention_analysis/case1
+```
+
+#### Step 3.5: Compare Cases
+
+```bash
+# Side-by-side comparison of cross-attention
+python cross_attention_capture.py \
+    --compare \
+    --case1 ../../../../logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --case2 ../../../../logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
+    --output-dir ../../../../logs/yogurt_banana_leftarm/cross_attention_comparison
 ```
 
 #### What to Look For
 
-1. **Denoising Trajectory**: Does the action "emerge" differently in hallucination cases?
-2. **Velocity Field**: Are there anomalous velocity spikes at specific steps?
-3. **Attention Maps**: Does attention focus on distractor objects?
-4. **Attention Entropy**: Is attention more diffuse in hallucination cases?
+| Metric | Normal Case | Hallucination Case |
+|--------|-------------|-------------------|
+| Distractor attention ratio | < 0.10 | > 0.20 |
+| Attention trend (steps 7-9) | Stable/decreasing | Increasing |
+| Attention entropy | Higher (diffuse) | Lower (focused on distractor) |
+| Counterfactual action delta | N/A | Large in XY direction |
 
 ---
 
@@ -586,23 +748,212 @@ cat ../../../../logs/investigation/reports/*/report.md
 
 ---
 
-## 8. References
+## 8. Current Hypotheses and Verification Status (2026-01-19)
 
-### Source Code
-- SmolVLA policy: `src/lerobot/policies/smolvla/modeling_smolvla.py`
-- Cross-attention: `src/lerobot/policies/smolvla/smolvlm_with_expert.py:309-422`
-- Debug tracker: `src/lerobot/policies/rtc/debug_tracker.py`
+### Critical Observation
+
+**The hallucinating arm goes to where the bottle USED TO BE, NOT to the banana (distractor).**
+
+This is the key insight for understanding the root cause.
+
+### Hypothesis Status Summary
+
+| # | Hypothesis | Status | Evidence |
+|---|------------|--------|----------|
+| H1 | Visual distractor (banana) triggers hallucination via cross-attention | **REJECTED** | Cross-attention shows LESS distractor attention in hallucination case; counterfactual masking shows no effect |
+| H2 | Model "replays" previous pick action (goes to bottle's original location) | **NEEDS VERIFICATION** | Behavioral observation supports this |
+| H3 | Training data lacks clear "stay still" patterns after task completion | **NEEDS VERIFICATION** | Dataset analysis required |
+| H4 | Diffusion/flow-matching favors smooth trajectories over abrupt stops | **NEEDS VERIFICATION** | Denoising trajectory analysis required |
+| H5 | KV cache retains "stale" visual information from early task phase | **NEEDS VERIFICATION** | KV cache analysis required |
+
+### Detailed Hypothesis Analysis
+
+#### H1: Visual Distractor Triggers Hallucination (REJECTED)
+
+**Original claim**: The banana is visually detected, and the model's attention to it triggers pick actions.
+
+**Evidence AGAINST**:
+1. Cross-attention analysis: Hallucination case has 0.93% distractor attention vs normal case 1.00% - hallucination has LESS attention
+2. Counterfactual masking: Removing banana changes action norm by only 0.12 (vs 3.5 total) - negligible effect
+3. Behavioral observation: Arm goes to bottle's original location, NOT to banana location
+
+**Status**: Rejected. Visual distractor is not the direct cause.
+
+---
+
+#### H2: Action Replay / Trajectory Memory (NEEDS VERIFICATION)
+
+**Claim**: The model "remembers" the pick-up trajectory and replays it after task completion.
+
+**Mechanism**: The VLM prefix (KV cache) may encode trajectory-related information that persists, causing the model to regenerate similar actions.
+
+**Evidence FOR**:
+- Arm goes to where bottle USED TO BE (original pick location)
+- Gripper opens during hallucination (consistent with "pick" action)
+- Pattern resembles initial pick-up motion
+
+**Verification needed**:
+1. Compare hallucination trajectory to initial pick-up trajectory
+2. Analyze action similarity metrics across task phases
+3. Check if KV cache encodes trajectory patterns
+
+---
+
+#### H3: Training Data Bias - Missing "Stay Still" Patterns (NEEDS VERIFICATION)
+
+**Claim**: Training data doesn't have enough examples of arms staying still after task completion.
+
+**Mechanism**: Without clear "idle" examples, the model defaults to exploratory/reaching behavior.
+
+**Evidence FOR**:
+- Hallucination occurs only after task completion
+- The model continues generating actions instead of stopping
+
+**Verification needed**:
+1. Analyze training dataset: What % of frames are post-completion "idle"?
+2. Check action distribution in final phase of episodes
+3. Compare to successful no-hallucination case timing
+
+---
+
+#### H4: Diffusion/Flow-Matching Trajectory Smoothness (NEEDS VERIFICATION)
+
+**Claim**: The diffusion process prefers smooth trajectory continuation over abrupt stops.
+
+**Mechanism**: Flow-matching learns velocity fields; stopping requires predicting near-zero velocity, which may be under-represented.
+
+**Evidence FOR**:
+- Flow-matching is trained on continuous trajectories
+- Stopping is a discontinuity that may be harder to model
+
+**Verification needed**:
+1. Analyze denoising velocity fields during normal vs hallucination
+2. Check if velocity magnitude drops to zero in normal case
+3. Compare action chunk boundaries
+
+---
+
+#### H5: KV Cache Stale Information (NEEDS VERIFICATION)
+
+**Claim**: The KV cache, computed at chunk start, retains "stale" visual features from when bottle was present.
+
+**Mechanism**: The VLM encodes scene state at chunk boundary; if bottle was still in hand, this may persist.
+
+**Evidence FOR**:
+- KV cache is computed once per 50-step chunk
+- Visual features may encode object positions from chunk start
+
+**Verification needed**:
+1. Map KV cache updates to task phase
+2. Check what scene state is encoded at each chunk boundary
+3. Analyze if hallucination correlates with specific chunk boundaries
+
+---
+
+### Phase 2 Research Plan
+
+#### Step 1: Understand Normal VLA Flow
+
+Before explaining hallucination, understand how normal operation works:
+
+1. **Task execution flow**: How do attention + diffusion work together during pick-place?
+2. **Task completion detection**: How does the model know to stop?
+3. **Normal action patterns**: What does "idle" look like in normal case?
+
+**Tools needed**: Enhanced trace analysis, action trajectory comparison
+
+#### Step 2: Trajectory Comparison (Verify H2)
+
+Compare hallucination trajectory to initial pick-up:
+
+```bash
+# TODO: Create trajectory_comparison.py
+python trajectory_comparison.py \
+    --case-dir logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --compare-phases "initial_pick" "hallucination" \
+    --output-dir logs/yogurt_banana_leftarm/trajectory_analysis
+```
+
+**Expected output**: Similarity score, trajectory overlay, joint-by-joint comparison
+
+#### Step 3: Dataset Analysis (Verify H3)
+
+Analyze training data for post-completion patterns:
+
+```bash
+# TODO: Run dataset analysis
+python analyze_dataset.py \
+    --dataset-path datasets_bimanuel/multitasks \
+    --focus post_completion \
+    --output-dir logs/investigation/dataset_analysis
+```
+
+**Key questions**:
+- What % of frames are in "idle/post-completion" phase?
+- What are typical action values after task completion?
+- Are there clear "stay still" patterns?
+
+#### Step 4: Denoising Dynamics Analysis (Verify H4)
+
+Analyze flow-matching behavior:
+
+```bash
+# TODO: Create denoising_analysis.py
+python denoising_analysis.py \
+    --case-dir logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+    --compare-to logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
+    --output-dir logs/yogurt_banana_leftarm/denoising_analysis
+```
+
+**Expected output**: Velocity field comparison, noise-to-action trajectory, convergence analysis
+
+---
+
+## 9. References
+
+### Source Code - Key Locations for Cross-Attention Analysis
+
+| Component | File | Lines | Purpose |
+|-----------|------|-------|---------|
+| Cross-attention forward | `smolvlm_with_expert.py` | 309-422 | Where cross-attention happens |
+| Softmax computation | `smolvlm_with_expert.py` | 575 | **HOOK POINT** for attention capture |
+| KV cache creation | `modeling_smolvla.py` | 797-804 | Prefix embeddings cached here |
+| Denoising loop | `modeling_smolvla.py` | 809-841 | 10-step action generation |
+| Debug tracker | `debug_tracker.py` | - | Existing debug infrastructure |
 
 ### Investigation Tools
-- All tools: `jdocs/scripts/investigation/tools/`
-- Config: `jdocs/scripts/investigation/tools/ablation_config.yaml`
-- Output: `logs/investigation/` (cases and reports)
 
-### Scripts
-- Inference: `jdocs/scripts/bimanual/infer_smolvla_bimanual.py`
-- Existing attention viz: `jdocs/scripts/generalization/experiments/visualize_attention.py`
+| Tool | Location | Purpose |
+|------|----------|---------|
+| Trace collection | `jdocs/scripts/investigation/tools/trace_inference.py` | Capture inference traces |
+| Self-attention viz | `jdocs/scripts/investigation/tools/visualize_attention.py` | Vision encoder attention |
+| **Cross-attention** | `jdocs/scripts/investigation/tools/cross_attention_capture.py` | **Action expert → VLM** |
+| **Distractor analysis** | `jdocs/scripts/investigation/tools/distractor_attention.py` | Quantify distractor attention |
+| **Counterfactual** | `jdocs/scripts/investigation/tools/counterfactual_masking.py` | Object masking experiments |
 
-### Research Papers
-- [SeqVLA: Completion-Aware VLA](https://roboticsproceedings.org/rss20/p112.pdf) - Learned completion detection for long-horizon tasks
-- [Neural Task Success Classifiers](https://arxiv.org/abs/2107.00722) - Learning task completion from few demonstrations
+### Collected Cases
+
+| Case | Location | Condition |
+|------|----------|-----------|
+| Hallucination | `logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table` | Banana on table |
+| Normal | `logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj` | No distractor |
+| Analysis report | `logs/yogurt_banana_leftarm/hallucination_analysis_report.md` | Findings summary |
+
+### Research Papers - VLA Hallucination Analysis
+
+**Architecture & Training**:
 - [SmolVLA Paper](https://arxiv.org/abs/2506.01844) - SmolVLA architecture and training
+- [SeqVLA: Completion-Aware VLA](https://roboticsproceedings.org/rss20/p112.pdf) - Learned completion detection
+
+**Attention Analysis Methods**:
+- [GMAR: Gradient-Driven Multi-Head Attention Rollout](https://arxiv.org/html/2504.19414v1) - Enhanced attention visualization
+- [AttnLRP: Attention-Aware Layer-wise Relevance Propagation](https://arxiv.org/html/2402.05602v2) - Faithful attention attribution
+- [Devils in Middle Layers of VLMs](https://openaccess.thecvf.com/content/CVPR2025/) - Middle-layer hallucination analysis
+
+**VLA Robustness**:
+- [LIBERO-Plus: VLA Robustness Analysis](https://arxiv.org/html/2510.13626.pdf) - Systematic perturbation studies
+- [Mechanistic Interpretability for VLAs](https://vla-mech-interp.github.io/) - Activation steering for VLAs
+
+**VLM Hallucination**:
+- [VADE: Visual Attention Guided Hallucination Detection](https://aclanthology.org/2025.findings-acl.773.pdf)
+- [VIB-Probe: Hallucination-Sensitive Head Detection](https://arxiv.org/html/2601.05547v1)
