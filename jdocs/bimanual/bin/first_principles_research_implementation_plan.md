@@ -419,14 +419,48 @@ Compile all findings into:
 
 ## Commit Strategy
 
-1. **Commit 1**: Implementation plan document (this file)
-2. **Commit 2**: Phase A tools (vision_feature_comparison.py, prefix_embedding_analysis.py)
-3. **Commit 3**: Phase B tools (kv_cache_content_analysis.py, denoising_step_analysis.py, cross_attention_per_denoising_step.py)
-4. **Commit 4**: Phase C tools (trajectory_distribution_visualization.py)
+1. **Commit 1**: Implementation plan document (this file) ✅
+2. **Commit 2**: Phase A tools (vision_feature_comparison.py, prefix_embedding_analysis.py) ✅
+3. **Commit 3**: Phase B tools (kv_cache_content_analysis.py, denoising_step_analysis.py) ✅
+4. **Commit 4**: Phase C tools (trajectory_distribution_visualization.py) ✅
 5. **Commit 5**: Phase A results and findings
 6. **Commit 6**: Phase B results and findings
 7. **Commit 7**: Phase C results and findings
 8. **Commit 8**: Final synthesis documents
+
+---
+
+## Implemented Tools Summary
+
+All 5 investigation tools have been implemented:
+
+| Tool | File | Status |
+|------|------|--------|
+| Vision Feature Comparison | `vision_feature_comparison.py` | ✅ Implemented |
+| Prefix Embedding Analysis | `prefix_embedding_analysis.py` | ✅ Implemented |
+| KV Cache Content Analysis | `kv_cache_content_analysis.py` | ✅ Implemented |
+| Denoising Step Analysis | `denoising_step_analysis.py` | ✅ Implemented |
+| Trajectory Distribution | `trajectory_distribution_visualization.py` | ✅ Implemented |
+
+### Running the Tools
+
+All tools are located in `jdocs/scripts/investigation/tools/` and can be run as:
+
+```bash
+cd jdocs/scripts/investigation/tools
+
+# Phase A (Offline Analysis)
+python vision_feature_comparison.py --checkpoint <path> --case-dirs <dirs> --step 200
+python prefix_embedding_analysis.py --checkpoint <path> --case-dirs <dirs> --step 200
+
+# Phase B (Live Inference)
+python kv_cache_content_analysis.py --checkpoint <path> --case-dirs <dirs> --step 200
+python denoising_step_analysis.py --checkpoint <path> --case-dirs <dirs> --step 200
+
+# Phase C (Dataset Analysis)
+python trajectory_distribution_visualization.py --dataset <path> --task-filter "yogurt" \
+    --halluc-trace <trace.jsonl> --normal-trace <trace.jsonl>
+```
 
 ---
 
