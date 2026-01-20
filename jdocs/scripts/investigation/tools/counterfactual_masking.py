@@ -4,18 +4,23 @@ Counterfactual Masking for SmolVLA Hallucination Investigation.
 
 Tests the causal effect of visual distractor objects by:
 1. Loading images from hallucination cases
-2. Masking out the distractor region
+2. Masking out the distractor region in the specified camera
 3. Running inference on both original and masked images
 4. Comparing action outputs
 
 If masking the distractor eliminates the hallucination-causing actions,
-this proves a causal visual link even if attention statistics are similar.
+this proves a causal visual link.
+
+IMPORTANT: Based on per-camera cross-attention analysis, the banana (distractor)
+is visible in the RIGHT WRIST camera and triggers hallucination there.
+Default camera to mask is now "right_wrist".
 
 Usage:
     python counterfactual_masking.py \
         --case-dir logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
         --distractor-bbox 380,260,450,320 \
-        --output-dir logs/yogurt_banana_leftarm/counterfactual_analysis
+        --camera right_wrist \
+        --output-dir logs/analysis/counterfactual
 """
 
 import argparse
@@ -59,6 +64,7 @@ class CounterfactualAnalysis:
     case_dir: str
     distractor_bbox: Tuple[int, int, int, int]
     mask_type: str  # "mean", "blur", "inpaint"
+    camera: str  # "head", "left_wrist", "right_wrist"
     timestamp: str
     results: List[MaskingResult]
     avg_action_delta_norm: float
@@ -171,15 +177,26 @@ def run_counterfactual_analysis(
     case_dir: Path,
     output_dir: Path,
     distractor_bbox: Tuple[int, int, int, int],
+    camera: str = "right_wrist",
     mask_type: str = "mean",
     checkpoint_path: Optional[str] = None,
     device: str = "cuda",
 ) -> CounterfactualAnalysis:
     """
     Run counterfactual masking experiment.
+
+    Args:
+        case_dir: Directory with case data (images, metadata)
+        output_dir: Output directory for analysis results
+        distractor_bbox: Bounding box of distractor as (x1, y1, x2, y2)
+        camera: Which camera to mask - "head", "left_wrist", or "right_wrist"
+        mask_type: Type of masking - "mean", "blur", "inpaint", "noise"
+        checkpoint_path: Override checkpoint path
+        device: Device for inference
     """
     print(f"Running counterfactual analysis for: {case_dir}")
     print(f"Distractor bbox: {distractor_bbox}")
+    print(f"Camera to mask: {camera}")
     print(f"Mask type: {mask_type}")
 
     # Load metadata
@@ -256,25 +273,41 @@ def run_counterfactual_analysis(
         left_wrist_img = cv2.cvtColor(cv2.imread(str(left_wrist_path)), cv2.COLOR_BGR2RGB)
         right_wrist_img = cv2.cvtColor(cv2.imread(str(right_wrist_path)), cv2.COLOR_BGR2RGB)
 
-        # Create masked version
-        masked_head_img = mask_fn(head_img, distractor_bbox)
+        # Create masked version of the specified camera
+        if camera == "head":
+            masked_head_img = mask_fn(head_img, distractor_bbox)
+            masked_left_wrist_img = left_wrist_img
+            masked_right_wrist_img = right_wrist_img
+            masked_img_for_save = masked_head_img
+        elif camera == "left_wrist":
+            masked_head_img = head_img
+            masked_left_wrist_img = mask_fn(left_wrist_img, distractor_bbox)
+            masked_right_wrist_img = right_wrist_img
+            masked_img_for_save = masked_left_wrist_img
+        elif camera == "right_wrist":
+            masked_head_img = head_img
+            masked_left_wrist_img = left_wrist_img
+            masked_right_wrist_img = mask_fn(right_wrist_img, distractor_bbox)
+            masked_img_for_save = masked_right_wrist_img
+        else:
+            raise ValueError(f"Unknown camera: {camera}. Must be 'head', 'left_wrist', or 'right_wrist'")
 
         # Save masked image for visualization
         cv2.imwrite(
-            str(masks_dir / f"step_{step_num:04d}_masked.jpg"),
-            cv2.cvtColor(masked_head_img, cv2.COLOR_RGB2BGR)
+            str(masks_dir / f"step_{step_num:04d}_{camera}_masked.jpg"),
+            cv2.cvtColor(masked_img_for_save, cv2.COLOR_RGB2BGR)
         )
 
-        # Run inference with original image
+        # Run inference with original images
         print(f"    Running original inference...")
         original_action = run_inference(
             policy, preprocessor, head_img, left_wrist_img, right_wrist_img, task, device
         )
 
         # Run inference with masked image
-        print(f"    Running masked inference...")
+        print(f"    Running masked inference (masking {camera})...")
         masked_action = run_inference(
-            policy, preprocessor, masked_head_img, left_wrist_img, right_wrist_img, task, device
+            policy, preprocessor, masked_head_img, masked_left_wrist_img, masked_right_wrist_img, task, device
         )
 
         # Compute delta
@@ -305,6 +338,7 @@ def run_counterfactual_analysis(
         case_dir=str(case_dir),
         distractor_bbox=distractor_bbox,
         mask_type=mask_type,
+        camera=camera,
         timestamp=datetime.now().isoformat(),
         results=results,
         avg_action_delta_norm=float(avg_delta),
@@ -390,7 +424,7 @@ def plot_counterfactual_results(
             ax4.set_xticklabels(steps)
             plt.colorbar(im, ax=ax4)
 
-    plt.suptitle(f'Counterfactual Masking Analysis (mask: {analysis.mask_type})', fontsize=14, fontweight='bold')
+    plt.suptitle(f'Counterfactual Masking Analysis (camera: {analysis.camera}, mask: {analysis.mask_type})', fontsize=14, fontweight='bold')
     plt.tight_layout()
 
     if output_path:
@@ -404,6 +438,7 @@ def visualize_masking(
     original_path: Path,
     masked_path: Path,
     bbox: Tuple[int, int, int, int],
+    camera: str,
     output_path: Path,
 ):
     """Visualize original vs masked image."""
@@ -411,6 +446,7 @@ def visualize_masking(
     masked = cv2.imread(str(masked_path))
 
     if original is None or masked is None:
+        print(f"Warning: Could not load images for visualization")
         return
 
     original_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
@@ -423,12 +459,12 @@ def visualize_masking(
     x1, y1, x2, y2 = bbox
     rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, linewidth=2, edgecolor='r', facecolor='none')
     axes[0].add_patch(rect)
-    axes[0].set_title('Original (with distractor)')
+    axes[0].set_title(f'{camera} camera: Original (with distractor)')
     axes[0].axis('off')
 
     # Masked
     axes[1].imshow(masked_rgb)
-    axes[1].set_title('Masked (distractor removed)')
+    axes[1].set_title(f'{camera} camera: Masked (distractor removed)')
     axes[1].axis('off')
 
     plt.tight_layout()
@@ -448,6 +484,9 @@ def main():
                        help="Distractor bounding box as x1,y1,x2,y2")
     parser.add_argument("--output-dir", type=str, required=True,
                        help="Output directory for analysis results")
+    parser.add_argument("--camera", type=str, default="right_wrist",
+                       choices=["head", "left_wrist", "right_wrist"],
+                       help="Which camera to mask (default: right_wrist)")
     parser.add_argument("--mask-type", type=str, default="mean",
                        choices=["mean", "blur", "inpaint", "noise"],
                        help="Type of masking to apply")
@@ -470,6 +509,7 @@ def main():
         case_dir=case_dir,
         output_dir=output_dir,
         distractor_bbox=distractor_bbox,
+        camera=args.camera,
         mask_type=args.mask_type,
         checkpoint_path=args.checkpoint,
     )
@@ -478,7 +518,8 @@ def main():
     print("\n" + "=" * 60)
     print("ANALYSIS SUMMARY")
     print("=" * 60)
-    print(f"\nMask type: {analysis.mask_type}")
+    print(f"\nCamera masked: {analysis.camera}")
+    print(f"Mask type: {analysis.mask_type}")
     print(f"Average action delta norm: {analysis.avg_action_delta_norm:.4f}")
     print(f"Max action delta norm: {analysis.max_action_delta_norm:.4f}")
 
@@ -486,6 +527,25 @@ def main():
     for r in analysis.results:
         print(f"  Step {r.inference_step}: original={r.original_action_norm:.3f}, "
               f"masked={r.masked_action_norm:.3f}, delta={r.action_delta_norm:.3f}")
+
+    # Interpretation
+    print("\n" + "-" * 60)
+    print("INTERPRETATION:")
+    print("-" * 60)
+    if analysis.avg_action_delta_norm > 0.1:
+        print("  ✓ SIGNIFICANT EFFECT: Masking the distractor changes actions substantially.")
+        print("  → This supports the hypothesis that the distractor causes hallucination.")
+        if analysis.results:
+            # Check if masked actions have lower norms (less movement)
+            avg_orig = np.mean([r.original_action_norm for r in analysis.results])
+            avg_masked = np.mean([r.masked_action_norm for r in analysis.results])
+            if avg_masked < avg_orig:
+                print(f"  → Masked actions are smaller ({avg_masked:.3f} vs {avg_orig:.3f}), suggesting less reaching behavior.")
+            else:
+                print(f"  → Masked actions are similar/larger ({avg_masked:.3f} vs {avg_orig:.3f}), check if reaching direction changed.")
+    else:
+        print("  ✗ MINIMAL EFFECT: Masking the distractor has little impact on actions.")
+        print("  → The distractor may not be the primary cause, or the bbox is incorrect.")
 
     # Generate visualizations
     print("\nGenerating visualizations...")
@@ -498,10 +558,12 @@ def main():
     # Visualize masking for first step
     if analysis.results:
         first_step = analysis.results[0].inference_step
+        camera = analysis.camera
         visualize_masking(
-            original_path=case_dir / "images" / f"step_{first_step:04d}_head.jpg",
-            masked_path=output_dir / "masked_images" / f"step_{first_step:04d}_masked.jpg",
+            original_path=case_dir / "images" / f"step_{first_step:04d}_{camera}.jpg",
+            masked_path=output_dir / "masked_images" / f"step_{first_step:04d}_{camera}_masked.jpg",
             bbox=distractor_bbox,
+            camera=camera,
             output_path=output_dir / "masking_comparison.png"
         )
 
@@ -509,6 +571,7 @@ def main():
     results_dict = {
         "case_dir": analysis.case_dir,
         "distractor_bbox": analysis.distractor_bbox,
+        "camera": analysis.camera,
         "mask_type": analysis.mask_type,
         "timestamp": analysis.timestamp,
         "summary": {
