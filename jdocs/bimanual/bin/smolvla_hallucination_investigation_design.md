@@ -27,22 +27,20 @@
 
 1. [Problem Statement](#1-problem-statement)
 2. [SmolVLA Architecture Context](#2-smolvla-architecture-context-corrected)
-3. [Language Ablation Experiments Design](#3-language-ablation-experiments-design)
-4. [Tools Overview](#4-tools-overview)
-5. [**Step-by-Step Usage Guide**](#5-step-by-step-usage-guide) ← START HERE
+3. [Tools Overview](#3-tools-overview)
+4. [**Step-by-Step Usage Guide**](#4-step-by-step-usage-guide) ← START HERE
    - [Phase 1: Collect Evidence](#phase-1-collect-evidence-traces)
    - [Phase 2: Analyze Dataset](#phase-2-analyze-training-dataset)
    - [Phase 3: Model Introspection](#phase-3-model-introspection)
-   - [Phase 4: Run Ablations](#phase-4-run-ablation-experiments)
-   - [Phase 5: Aggregate & Report](#phase-5-aggregate-evidence--generate-report)
-6. [Key Questions to Answer](#6-key-questions-to-answer)
-7. [Success Criteria](#7-success-criteria)
-8. [Current Hypotheses and Verification Status](#8-current-hypotheses-and-verification-status-2026-01-19)
-9. [Phase 2: Mechanistic Understanding Investigation](#9-phase-2-mechanistic-understanding-investigation)
-10. [Phase 2a Findings: Trajectory Shape Analysis](#10-phase-2a-findings-trajectory-shape-analysis)
-11. [SmolVLA Internal Mechanism: Deep Dive](#11-smolvla-internal-mechanism-deep-dive-with-walking-examples)
-12. [**CRITICAL: Multi-Camera Processing Gap**](#12-critical-finding-multi-camera-processing-gap)
-13. [**Per-Camera Cross-Attention Analysis Results**](#13-per-camera-cross-attention-analysis-results-2026-01-19) ← LATEST FINDINGS
+   - [Phase 4: Aggregate Evidence](#phase-4-aggregate-evidence--generate-report)
+5. [Key Questions to Answer](#5-key-questions-to-answer)
+6. [Success Criteria](#6-success-criteria)
+7. [Current Hypotheses and Verification Status](#7-current-hypotheses-and-verification-status-2026-01-19)
+8. [Mechanistic Understanding Investigation](#8-mechanistic-understanding-investigation)
+9. [Trajectory Shape Analysis Findings](#9-trajectory-shape-analysis-findings)
+10. [SmolVLA Internal Mechanism: Deep Dive](#10-smolvla-internal-mechanism-deep-dive)
+11. [Multi-Camera Processing Discovery](#11-multi-camera-processing-discovery)
+12. [**Per-Camera Cross-Attention Analysis Results**](#12-per-camera-cross-attention-analysis-results) ← LATEST FINDINGS
 
 ---
 
@@ -93,7 +91,7 @@ The SmolVLA model exhibits "hallucination" behavior during bimanual robot infere
 2. Visual attention patterns may reflect our training data biases
 3. Solutions involving vision encoder modification are viable
 
-### KV Cache Behavior (Critical for Language Ablation)
+### KV Cache Behavior
 
 From `modeling_smolvla.py:791-804`:
 ```python
@@ -101,76 +99,16 @@ From `modeling_smolvla.py:791-804`:
 prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
     images, img_masks, lang_tokens, lang_masks, state=state
 )
-# ...
 _, past_key_values = self.vlm_with_expert.forward(
-    # ...
     fill_kv_cache=True,  # Computed once, reused for all 10 denoising steps
 )
 ```
 
-**Implication**: The KV cache containing vision+language embeddings is computed **once** at the start of each 50-step action chunk. To change the task description mid-inference, we must:
-1. Trigger a new chunk generation (invalidate current action queue)
-2. Or wait until the next natural chunk boundary
+**Key insight**: The KV cache containing vision+language embeddings is computed **once** at the start of each 50-step action chunk and reused for all 10 denoising steps.
 
 ---
 
-## 3. Language Ablation Experiments Design
-
-### 3.1 The Challenge
-
-Current SmolVLA inference uses finetuned task names like:
-- `"Use left arm to pick up the yogurt bottle and place it in the bin"`
-
-The task string is passed once per inference step and embedded into the KV cache at chunk generation time.
-
-### 3.2 Approach: Dynamic Task Modification
-
-**Option A: Append Completion Phrase**
-```python
-# After completion detection (e.g., step > 180)
-task = "Use left arm to pick up the yogurt bottle and place it in the bin. Task complete, stay still."
-```
-
-**Option B: Replace Task Entirely**
-```python
-task = "Hold current position. Do not move."
-```
-
-### 3.3 Implementation (DONE)
-
-The `--dynamic-task` mode has been added to `infer_smolvla_bimanual.py`:
-
-```bash
-python infer_smolvla_bimanual.py \
-    --task-key left_yogurt_bin \
-    --dynamic-task \
-    --completion-phrase "Task complete. Hold position." \
-    --completion-step 180
-```
-
-### 3.4 Completion Detection: Research Findings
-
-**IMPORTANT**: VLA models like SmolVLA do **NOT have built-in completion detection**.
-
-Per research ([SeqVLA paper](https://roboticsproceedings.org/rss20/p112.pdf)), automatic heuristics
-(gripper state, action variance) are **unreliable** and can cause false positives that ruin
-normal execution. SeqVLA solves this by adding a learned "completion detection head" trained
-jointly with action generation.
-
-**For our research**, we only support **manual step count**:
-- Observe when tasks typically complete during pilot runs
-- Set `--completion-step` accordingly (e.g., 180 for yogurt-to-bin task)
-
-| Strategy | Status | Notes |
-|----------|--------|-------|
-| `step_count` | ✅ Supported | Manual specification required |
-| `gripper_close` | ❌ Removed | Unreliable, false positives |
-| `action_variance` | ❌ Removed | Unreliable, false positives |
-| Learned detector | 🔬 Future | Would require training completion head (SeqVLA approach) |
-
----
-
-## 4. Tools Overview
+## 3. Tools Overview
 
 All tools are located in `jdocs/scripts/investigation/tools/`.
 Output goes to `logs/` (cases and analysis results).
@@ -369,19 +307,6 @@ python trace_inference.py \
     --notes "No distractor objects"
 ```
 
-#### Step 1.3: Capture with Dynamic Task (language ablation)
-
-```bash
-python trace_inference.py \
-    --task-key left_yogurt_bin \
-    --case-type ablation \
-    --dynamic-task \
-    --completion-phrase "Task complete. Hold position." \
-    --completion-step 180 \
-    --duration 90 \
-    --notes "Testing completion phrase intervention"
-```
-
 #### Using custom task string
 
 ```bash
@@ -531,74 +456,20 @@ python cross_attention_capture.py \
 
 ---
 
-### Phase 4: Run Ablation Experiments
-
-**Goal**: Test hypotheses through controlled experiments.
-
-#### Step 4.1: List Available Experiments
-
-```bash
-python run_ablation.py --list-experiments
-```
-
-Available experiments:
-- `baseline_no_modification` - Control
-- `language_completion_hold` - "Hold position" phrase
-- `language_completion_stay_still` - "Stay still" phrase
-- `language_completion_early` - Trigger at step 150
-- `language_completion_late` - Trigger at step 220
-- `language_completion_gripper` - Gripper-based trigger
-- `language_completion_variance` - Variance-based trigger
-
-#### Step 4.2: Run Single Experiment
-
-```bash
-python run_ablation.py \
-    --experiment language_completion_hold \
-    --checkpoint $CHECKPOINT \
-    --task-key left_yogurt_bin \
-    --output-dir ../../../../logs/investigation/reports/ablation_single \
-    --dry-run  # Remove for real hardware
-```
-
-#### Step 4.3: Run Full Ablation Suite
-
-```bash
-python run_ablation.py \
-    --config ablation_config.yaml \
-    --checkpoint $CHECKPOINT \
-    --task-key left_yogurt_bin \
-    --output-dir ../../../../logs/investigation/reports/ablation_suite \
-    --dry-run  # Remove for real hardware
-```
-
-#### Step 4.4: Review Ablation Results
-
-```bash
-# View suite report
-cat ../../../../logs/investigation/reports/ablation_suite/suite_report.md
-
-# Check which experiments reduced hallucination
-grep -A2 "effect_size" ../../../../logs/investigation/reports/ablation_suite/suite_results.json
-```
-
----
-
-### Phase 5: Aggregate Evidence & Generate Report
+### Phase 4: Aggregate Evidence & Generate Report
 
 **Goal**: Synthesize all findings into actionable insights.
 
-#### Step 5.1: Run Evidence Aggregation
+#### Step 4.1: Run Evidence Aggregation
 
 ```bash
 python aggregate_evidence.py \
     --investigation-dir ../../../../logs/investigation/cases \
-    --ablation-results ../../../../logs/investigation/reports/ablation_suite \
     --dataset-analysis ../../../../logs/investigation/reports/dataset_analysis \
     --output-dir ../../../../logs/investigation/reports/final
 ```
 
-#### Step 5.2: Review Final Report
+#### Step 4.2: Review Final Report
 
 ```bash
 # View the comprehensive investigation report
@@ -608,9 +479,8 @@ cat ../../../../logs/investigation/reports/final/investigation_report.md
 #### Output Contains
 
 1. **Evidence Correlation Matrix** - Which factors correlate with hallucination
-2. **Ablation Comparison** - Which interventions were effective
-3. **Root Cause Analysis** - Most likely cause with causal chain
-4. **Recommended Solutions** - Prioritized list of fixes
+2. **Root Cause Analysis** - Most likely cause with causal chain
+3. **Recommended Solutions** - Prioritized list of fixes
 
 ---
 
@@ -622,14 +492,14 @@ cat ../../../../logs/investigation/reports/final/investigation_report.md
 └─────────────────────────────────────────────────────────────────┘
 
 PHASE 1: COLLECT EVIDENCE
-    ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-    │   Hallucination  │    │     Normal       │    │    Ablation      │
-    │   Cases (3+)     │    │    Cases (2+)    │    │   Cases (5+)     │
-    └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
-             │                       │                       │
-             └───────────────────────┴───────────────────────┘
-                                     │
-                                     ▼
+    ┌──────────────────┐    ┌──────────────────┐
+    │   Hallucination  │    │     Normal       │
+    │   Cases (3+)     │    │    Cases (2+)    │
+    └────────┬─────────┘    └────────┬─────────┘
+             │                       │
+             └───────────────────────┘
+                          │
+                          ▼
                      logs/investigation/cases/
                      (trace.jsonl, images/)
 
@@ -652,13 +522,7 @@ PHASE 3: MODEL INTROSPECTION
     ├── trajectory.png      ├── spatial_heatmap.png
     └── velocity.png        └── attention_summary.png
 
-PHASE 4: ABLATION EXPERIMENTS
-    ┌──────────────────┐
-    │  run_ablation    │ ──────► logs/investigation/reports/ablation_suite/
-    │      .py         │         ├── suite_results.json
-    └──────────────────┘         └── suite_report.md
-
-PHASE 5: SYNTHESIS
+PHASE 4: SYNTHESIS
     ┌──────────────────┐
     │aggregate_evidence│ ◄────── ALL ABOVE OUTPUTS
     │       .py        │
@@ -682,21 +546,17 @@ cd jdocs/scripts/investigation/tools
 python trace_inference.py -k left_yogurt_bin --case-type hallucination --notes "with banana"
 python trace_inference.py -k left_yogurt_bin --case-type normal --notes "no distractor"
 
-# 2. Collect with language ablation
-python trace_inference.py -k left_yogurt_bin --case-type ablation \
-    --dynamic-task --completion-step 180 --notes "completion phrase test"
-
-# 3. Using custom task string
+# 2. Using custom task string
 python trace_inference.py -t "Use left arm to pick up the orange" --case-type hallucination
+
+# 3. Run cross-attention analysis
+python cross_attention_capture.py --case-dir logs/yogurt_banana_leftarm/case_XXXXX
 
 # 4. View collected cases
 ls -la ../../../../logs/investigation/cases/
 
-# 5. Analyze dataset (specify dataset path)
-python analyze_dataset.py -d datasets_bimanuel/multitasks --analyze-phases
-
-# 6. View results
-cat ../../../../logs/investigation/reports/*/report.md
+# 5. View analysis results
+ls -la logs/analysis/
 ```
 
 ### Parameter Reference
@@ -710,7 +570,7 @@ cat ../../../../logs/investigation/reports/*/report.md
 #### Output Organization
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--case-type` | `hallucination` | **Folder category** for organizing traces. Options: `hallucination`, `normal`, `ablation`. Output goes to `logs/investigation/cases/<case-type>/`. |
+| `--case-type` | `hallucination` | **Folder category** for organizing traces. Options: `hallucination`, `normal`. Output goes to `logs/investigation/cases/<case-type>/`. |
 | `--case-name` | `YYYYMMDD_HHMMSS` | Custom folder name. Default is auto-generated timestamp. |
 | `--notes` | `""` | Free-text notes saved to `metadata.json`. Describe scene (e.g., "Banana on table near gripper"). |
 
@@ -719,13 +579,6 @@ cat ../../../../logs/investigation/reports/*/report.md
 |-----------|---------|-------------|
 | `--capture-interval` | `50` | Save camera image every N inference steps. At 30Hz, 50 steps ≈ 1.7 seconds. |
 | `--no-capture-images` | `False` | Disable image capture. **Images are captured by default.** |
-
-#### Language Ablation (Dynamic Task)
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--dynamic-task` | `False` | Enable language ablation mode. Injects completion phrase mid-inference. |
-| `--completion-step` | `180` | Step number to trigger phrase injection. **Must observe real task completion to set correctly.** |
-| `--completion-phrase` | `"Task complete. Hold position."` | Phrase injected at completion step. Forces KV cache recompute. |
 
 #### Run Options
 | Parameter | Default | Description |
@@ -752,11 +605,6 @@ cat ../../../../logs/investigation/reports/*/report.md
 - Where does attention go in hallucination cases?
 - At which denoising step does the hallucination action emerge?
 - Is attention entropy higher in hallucination cases?
-
-### From Ablation Experiments
-- Does adding completion phrase reduce hallucination?
-- Which phrase is most effective?
-- At what step should completion be triggered?
 
 ---
 
