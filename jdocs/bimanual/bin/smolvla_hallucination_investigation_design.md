@@ -2,8 +2,8 @@
 
 ## Document Info
 - **Created**: 2026-01-18
-- **Last Updated**: 2026-01-19 (Major revision - per-camera analysis complete)
-- **Status**: **H9 SUPPORTED** - Banana in right wrist camera triggers hallucination
+- **Last Updated**: 2026-01-19 (Updated with Gemini/GPT multi-model analysis)
+- **Status**: **H-A LIKELY** - Missing idle data is primary cause; banana is weak correlate
 - **Related Files**:
   - `jdocs/scripts/bimanual/infer_smolvla_bimanual.py`
   - `jdocs/scripts/investigation/tools/` (all investigation tools)
@@ -12,14 +12,15 @@
 
 ### Quick Summary (TL;DR)
 
-**Root Cause Identified**: The model's cross-attention mechanism focuses on the banana in the RIGHT WRIST camera, triggering "pick up" action patterns even after task completion.
+**Root Cause Analysis (Multi-Model Consensus)**:
+- **Primary cause (H-A)**: Training data lacks "idle/stop" examples (only 1.2% have idle frames)
+- **Secondary**: Model defaults to "replay" behavior (100% of training has position replay)
+- **Attention correlation**: Right wrist camera shows +1-4% elevated attention to banana, but **counterfactual masking showed MINIMAL effect** on actions
 
-**Evidence**:
-- Right wrist attention is +1-4% elevated in hallucination case
-- Spatial heatmaps show focused attention on banana area
-- Attention persists throughout episode
+**Key Insight (GPT)**:
+> "The model sees banana and reaches for banana" is NOT supported. The banana is likely a correlate, not the direct cause.
 
-**Next Step**: Counterfactual masking experiment to confirm causality
+**Next Steps**: Run GPT-recommended tests (replay similarity, seed sweep, chunk boundary analysis)
 
 ---
 
@@ -42,7 +43,11 @@
 11. [Multi-Camera Processing Discovery](#11-multi-camera-processing-discovery)
 12. [Multi-Camera Processing Discovery (cont.)](#12-critical-finding-multi-camera-processing-gap)
 13. [**Per-Camera Cross-Attention Analysis Results**](#13-per-camera-cross-attention-analysis-results-2026-01-19)
-14. [**Phase 2b: Deep Cross-Attention Analysis Plan**](#14-phase-2b-deep-cross-attention-analysis-plan-2026-01-19) ← NEXT STEPS
+14. [**Phase 2b: Deep Analysis Plan (w/ Gemini+GPT Insights)**](#14-phase-2b-deep-analysis-plan-2026-01-19) ← NEXT STEPS
+    - 14.1 Multi-Model Analysis Summary
+    - 14.2 Revised Hypotheses (H-A through H-E)
+    - 14.8 GPT-Recommended Tests (replay, seed sweep, chunk boundary)
+    - 14.12 Cautionary Note on Banana Causality
 
 ---
 
@@ -2365,25 +2370,66 @@ The new cross-attention analysis captures what the action expert **actually atte
 
 ---
 
-## 14. Phase 2b: Deep Cross-Attention Analysis Plan (2026-01-19)
+## 14. Phase 2b: Deep Analysis Plan (2026-01-19)
 
-### 14.1 Current Status & Critical Gap
+### 14.1 Multi-Model Analysis Summary (Gemini + GPT)
+
+Both Gemini and GPT analyzed this investigation. Their key conclusions:
+
+#### Consensus (Both Agree)
+
+| Finding | Evidence | Implication |
+|---------|----------|-------------|
+| **Primary root cause: H3 (Missing idle data)** | Only 1.2% of training has idle frames | Model never learned to stop |
+| **Model defaults to "replay"** | 100% of training has position replay | When uncertain, model replays earlier positions |
+| **Hallucination is coherent, not noise** | RAMP trajectory, not jitter | Model is executing a planned motion |
+| **Solution: Add idle tail data** | Both recommend | Collect "stay still" episodes |
+
+#### Key Disagreement
+
+| Gemini | GPT |
+|--------|-----|
+| Banana is a **confirmed trigger** (+1.5% attention) | Banana causality is **weak/unproven** |
+| Visual trigger mechanism is clear | **Counterfactual masking showed negligible effect** |
+| Focus on attention patterns | Focus on replay similarity and seed sensitivity |
+
+**GPT's Critical Insight**:
+> "The model sees banana and reaches for banana" is NOT supported. If distractor presence matters, it's likely via **global scene embedding shifts**, **state-dependent dynamics**, or (most plausibly) **a missing 'stop/idle' behavior prior**.
+
+### 14.2 Revised Hypotheses (From GPT, Ranked by Likelihood)
+
+| Rank | Hypothesis | Mechanism | Test |
+|------|------------|-----------|------|
+| **H-A** (most likely) | Missing post-completion supervision | Model never learned "idle" attractor; defaults to continuation | Add idle tails and measure halluc drop |
+| **H-B** | Replay prior overrepresented | Dataset has strong "revisit position" patterns | DTW similarity between halluc motion and earlier segments |
+| **H-C** | Chunk boundary / KV cache interaction | Completion timing relative to 50-step chunks affects planning | Test completion at steps 180, 200, 220 |
+| **H-D** | Global scene embedding shift | Banana changes prefix embedding distribution (not localized attention) | Compare prefix embeddings, not attention ratios |
+| **H-E** | Diffusion sampling instability | Multiple attractors at completion; seed determines outcome | Seed sweep from same state at completion |
+
+### 14.3 Critical Gap
 
 **What we know:**
 - H9 SUPPORTED: Right wrist camera has +1-4% elevated attention in hallucination case
-- Counterfactual masking (removing banana) shows MINIMAL effect on actions
+- **BUT**: Counterfactual masking (removing banana) shows **MINIMAL effect** on actions
 - Training data has only 1.2% post-completion idle frames
 - Divergence starts at step ~210
 
-**Critical Gap:**
-We lack a clear causal mechanism explaining WHY banana attention triggers action toward **bottle's PREVIOUS location** (not toward the banana itself). The current evidence is correlational, not causal.
+**The deeper question (from GPT):**
+> "Why does the model replay to the bottle's PREVIOUS location regardless of what it's attending to?"
 
-### 14.2 Research Questions
+This shifts focus from "attention analysis" to:
+1. **Replay similarity** - Is hallucination just replaying earlier motion?
+2. **Seed sensitivity** - Is this deterministic or stochastic?
+3. **Chunk boundary effects** - Does timing matter?
 
-1. **Temporal**: What happens between steps 100-200? When exactly does divergence trigger?
-2. **Comparative**: Does case 2 (banana on plate, no hallucination) show different attention patterns?
-3. **Mechanistic**: How does attention → velocity field → action? Can we trace the causal path?
-4. **Dataset**: Are there training patterns that explain "position replay" behavior?
+### 14.4 Research Questions (Updated)
+
+1. **Replay**: Is post-completion motion similar to earlier motion segments? (H-B)
+2. **Determinism**: Does behavior change with different seeds? (H-E)
+3. **Timing**: Does hallucination correlate with chunk boundaries? (H-C)
+4. **Embedding**: Do prefix embeddings differ more than attention ratios? (H-D)
+5. **Temporal**: What happens between steps 100-200? (fine-grained)
+6. **Comparative**: Does case 2 (banana on plate) show different patterns?
 
 ### 14.3 Integration Gap (NOT YET IMPLEMENTED)
 
@@ -2545,39 +2591,168 @@ def on_denoise_step(step, time, x_t, v_t, dt):
 # Check if these heads are more active in hallucination case
 ```
 
-### 14.8 Implementation Priority
+### 14.8 GPT-Recommended Concrete Tests (High Priority)
 
-| # | Analysis | Purpose | Effort | Expected Value |
-|---|----------|---------|--------|----------------|
-| 1 | **Case 2 analysis** | Compare banana-on-plate (no halluc) with banana-on-table (halluc) | LOW | HIGH |
-| 2 | **Fine-grained temporal** | Capture steps 100-250 at 10-step intervals | LOW | HIGH |
-| 3 | **Velocity field correlation** | Trace attention → v_t → action | MEDIUM | HIGH |
-| 4 | **Denoising trajectory** | Find which denoising step diverges | LOW | MEDIUM |
-| 5 | **Per-action-token attention** | Which joints attend where | MEDIUM | MEDIUM |
-| 6 | **Dataset action clustering** | Match halluc actions to training patterns | MEDIUM | HIGH |
-| 7 | **Layer-wise patching** | Find critical layer | HIGH | HIGH |
+These tests from GPT's analysis are designed to quickly validate or falsify the top hypotheses:
 
-### 14.9 Files to Create/Modify
+#### Test 1: Replay Similarity Analysis (Validate H-B)
+
+**Goal**: Determine if hallucination motion is just replaying earlier motion segments.
+
+```python
+# replay_similarity_analysis.py
+#
+# For each run, compute similarity between post-completion window (e.g., 200-260)
+# and each earlier window (0-200).
+#
+# Report:
+# - Best-match segment + similarity score
+# - DTW/correlation score
+# - Matched joint subsets
+#
+# Expected: Hallucination cases show strong match to "approach/pick" or other
+# repeated primitives. Normal cases show no match.
+
+def compute_replay_similarity(halluc_trace, normal_trace):
+    """
+    Compare post-completion trajectory to earlier segments using DTW.
+
+    If halluc has high similarity to earlier "approach" segment:
+    → H-B confirmed (replay prior is overrepresented)
+
+    If halluc motion doesn't match any earlier motion:
+    → H-B rejected (hallucination is novel, not replay)
+    """
+    pass
+```
+
+**Falsification criterion**: Post-completion motion does NOT match any earlier motion primitives.
+
+#### Test 2: Seed Sweep at Completion (Test H-E)
+
+**Goal**: Test if the terminal region has multiple attractors (idle vs replay).
+
+```python
+# seed_sweep_test.py
+#
+# From the same captured observation/state at completion (step ~200-210),
+# run multiple seeds and check if outcomes are bimodal.
+#
+# If outcomes are bimodal (idle vs replay):
+# → H-E confirmed (diffusion instability at weak attractor)
+# → "idle tails" training should fix by strengthening idle attractor
+#
+# If behavior is deterministic (always fails the same way):
+# → H-E rejected (instability is not the issue)
+
+def seed_sweep_at_completion(trace_dir, step=200, num_seeds=10):
+    """
+    Run inference from saved state with different noise seeds.
+    Returns distribution of outcomes.
+    """
+    pass
+```
+
+**Falsification criterion**: Behavior is deterministic given same inputs and seed.
+
+#### Test 3: Completion Offset vs Chunk Boundary (Test H-C)
+
+**Goal**: Check if hallucination probability depends on when task completes relative to 50-step chunk boundaries.
+
+```python
+# chunk_boundary_test.py
+#
+# Create runs where task completes at different times:
+# - completion at step 180 (near chunk 4 start at 200)
+# - completion at step 200 (exactly at chunk boundary)
+# - completion at step 220 (middle of chunk)
+#
+# If failures cluster when completion aligns with chunk boundaries:
+# → H-C confirmed (chunk planning amplifies hallucination)
+# → KV cache refresh at completion should help
+#
+# If hallucination occurs equally regardless of chunk boundaries:
+# → H-C rejected
+
+def test_chunk_boundary_sensitivity(results_by_completion_step):
+    """
+    Analyze hallucination rate vs completion step modulo 50.
+    """
+    pass
+```
+
+**Falsification criterion**: Hallucination occurs equally regardless of chunk boundaries.
+
+#### Test 4: Small Idle Data Intervention (Confirm H-A)
+
+**Goal**: The definitive test - if adding idle tails fixes it, H-A is confirmed as dominant cause.
+
+```
+Protocol:
+1. Collect ~20 episodes of robot staying still for 2-5 seconds after task completion
+2. Include scenes with/without distractors during idle
+3. Fine-tune model briefly on combined data (original + idle)
+4. Re-run hallucination scenario
+5. Measure hallucination drop
+
+Expected: If H-A is correct, even brief finetuning should dramatically reduce hallucination.
+```
+
+### 14.9 Implementation Priority (Updated with GPT Tests)
+
+| # | Analysis | Hypothesis | Effort | Expected Value | Priority |
+|---|----------|------------|--------|----------------|----------|
+| 1 | **Replay similarity analysis** | H-B | LOW | HIGH | **🔥 FIRST** |
+| 2 | **Seed sweep at completion** | H-E | MEDIUM | HIGH | **🔥 SECOND** |
+| 3 | **Case 2 analysis** | Compare banana positions | LOW | HIGH | THIRD |
+| 4 | **Completion offset test** | H-C | MEDIUM | MEDIUM | FOURTH |
+| 5 | **Fine-grained temporal** | Details | LOW | MEDIUM | FIFTH |
+| 6 | **Denoising trajectory** | Details | LOW | MEDIUM | SIXTH |
+| 7 | **Small idle data intervention** | H-A (definitive) | HIGH | **HIGHEST** | WHEN READY |
+
+**Why this ordering (from GPT)**:
+1. **Replay similarity** (H-B) - Fastest test; explains "why bottle's previous location"
+2. **Seed sweep** (H-E) - Reveals if terminal region is multi-attractor
+3. **Case 2** - Cheap comparison that may reveal position-dependence
+4. **Chunk boundary** (H-C) - Tests if timing is an amplifier
+5-6. **Details** - Fill in gaps after main hypotheses tested
+7. **Data intervention** - Most expensive but most definitive; do after understanding mechanism
+
+### 14.10 Files to Create/Modify
 
 | File | Action | Purpose |
 |------|--------|---------|
+| **`replay_similarity_analysis.py`** | CREATE | **DTW comparison of halluc motion to earlier segments** |
+| **`seed_sweep_test.py`** | CREATE | **Test bimodal outcomes with different seeds** |
 | `cross_attention_capture.py` | MODIFY | Add `--steps` parameter for fine granularity |
 | `velocity_attention_correlation.py` | CREATE | Capture v_t + attention correlation |
 | `compare_all_cases.py` | CREATE | 3-way comparison visualization |
 | `denoising_trajectory_analysis.py` | CREATE | Analyze x_t trajectory through denoising |
 | `infer_smolvla_bimanual.py` or `trace_inference.py` | MODIFY | Integrate capture hooks for live data |
 
-### 14.10 Success Criteria
+### 14.11 Success Criteria
 
-1. **Temporal clarity**: Identify exact step where attention diverges (not just "around 200")
-2. **Case comparison**: Explain why case 2 (banana on plate) doesn't hallucinate
-3. **Mechanistic link**: Show correlation between attention pattern and velocity direction
-4. **Actionable insight**: Identify whether fix should target:
-   - Dataset (add idle frames)
+1. **Hypothesis validation**: Confirm or reject H-A through H-E with quantitative evidence
+2. **Replay explanation**: Determine if hallucination is replay or novel motion (H-B)
+3. **Determinism check**: Confirm if behavior is deterministic or stochastic (H-E)
+4. **Case comparison**: Explain why case 2 (banana on plate) doesn't hallucinate
+5. **Actionable insight**: Identify whether fix should target:
+   - Dataset (add idle frames) ← Most likely based on H-A
    - Model (attention masking)
    - Inference (termination detection)
 
-### 14.11 Research References
+### 14.12 Cautionary Note on Banana Causality (From GPT)
+
+> **GPT's warning**: "It's easy to over-attribute causality to scene distractors because the failure appears when banana is 'near workspace'."
+>
+> Given the counterfactual masking + cross-attention results, the banana is more likely acting as:
+> - A **proxy for global scene complexity** (embedding shift)
+> - A **proxy for different robot micro-state** (slightly different arm configuration at completion)
+> - Or simply a **coincidental correlate** across a small sample
+>
+> **Recommendation**: Treat "banana causes hallucination" as a **weak correlation** until a larger controlled sweep confirms it. Focus investigation on the replay/idle hypothesis (H-A/H-B) which has stronger mechanistic grounding.
+
+### 14.13 Research References
 
 Key papers informing this approach:
 - **"Devils in Middle Layers of Large Vision-Language Models"** (CVPR 2025) - Hallucination often emerges in middle layers
