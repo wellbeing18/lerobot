@@ -40,7 +40,9 @@
 9. [Trajectory Shape Analysis Findings](#9-trajectory-shape-analysis-findings)
 10. [SmolVLA Internal Mechanism: Deep Dive](#10-smolvla-internal-mechanism-deep-dive)
 11. [Multi-Camera Processing Discovery](#11-multi-camera-processing-discovery)
-12. [**Per-Camera Cross-Attention Analysis Results**](#12-per-camera-cross-attention-analysis-results) ← LATEST FINDINGS
+12. [Multi-Camera Processing Discovery (cont.)](#12-critical-finding-multi-camera-processing-gap)
+13. [**Per-Camera Cross-Attention Analysis Results**](#13-per-camera-cross-attention-analysis-results-2026-01-19)
+14. [**Phase 2b: Deep Cross-Attention Analysis Plan**](#14-phase-2b-deep-cross-attention-analysis-plan-2026-01-19) ← NEXT STEPS
 
 ---
 
@@ -2360,3 +2362,225 @@ All identified tool improvements have been implemented:
 | Internal processing | **Decision-making pathway** |
 
 The new cross-attention analysis captures what the action expert **actually attends to** when generating actions, making it directly relevant to understanding hallucination triggers.
+
+---
+
+## 14. Phase 2b: Deep Cross-Attention Analysis Plan (2026-01-19)
+
+### 14.1 Current Status & Critical Gap
+
+**What we know:**
+- H9 SUPPORTED: Right wrist camera has +1-4% elevated attention in hallucination case
+- Counterfactual masking (removing banana) shows MINIMAL effect on actions
+- Training data has only 1.2% post-completion idle frames
+- Divergence starts at step ~210
+
+**Critical Gap:**
+We lack a clear causal mechanism explaining WHY banana attention triggers action toward **bottle's PREVIOUS location** (not toward the banana itself). The current evidence is correlational, not causal.
+
+### 14.2 Research Questions
+
+1. **Temporal**: What happens between steps 100-200? When exactly does divergence trigger?
+2. **Comparative**: Does case 2 (banana on plate, no hallucination) show different attention patterns?
+3. **Mechanistic**: How does attention → velocity field → action? Can we trace the causal path?
+4. **Dataset**: Are there training patterns that explain "position replay" behavior?
+
+### 14.3 Integration Gap (NOT YET IMPLEMENTED)
+
+**Problem**: The capture tools exist but have NOT been integrated into live inference:
+
+| Tool | Status | Limitation |
+|------|--------|------------|
+| `denoising_trajectory_capture.py` | EXISTS | Not integrated into inference |
+| `kv_cache_analysis.py` | EXISTS | Not integrated into inference |
+| `cross_attention_capture.py` | EXISTS | Runs on saved images, not live |
+
+**Current limitation**: We can only analyze steps where images were captured (every 50 steps). We CANNOT capture:
+- Denoising-level data (v_t, x_t at each denoising step 0-9)
+- KV cache states during inference
+- Fine-grained step intervals (e.g., every 10 steps)
+
+**Integration needed** (per section 10.10):
+```python
+# In inference script, add hooks:
+from jdocs.scripts.investigation.tools.denoising_trajectory_capture import DenoisingTrajectoryCapture
+
+denoising_capture = DenoisingTrajectoryCapture()
+
+# During denoising loop:
+def on_denoise_step(step, time, x_t, v_t, dt):
+    denoising_capture.capture_denoising_step(step, time, x_t, v_t, dt)
+```
+
+### 14.4 Phase 2b-1: Fill Analysis Gaps
+
+#### 14.4.1 Fine-Grained Temporal Analysis (Steps 100-250)
+
+**Problem**: Current analysis only has data at steps 0, 100, 200, 250, 300, 350. The divergence happens around step 210 but we only have 2 data points (200, 250).
+
+**Action**: Modify `cross_attention_capture.py` to capture at finer intervals:
+- Steps: 100, 125, 150, 175, 200, 210, 220, 230, 240, 250
+- This will reveal exactly when attention patterns shift
+
+**Files to modify**:
+- `jdocs/scripts/investigation/tools/cross_attention_capture.py`
+  - Add `--steps` parameter for custom step list
+  - Default: current 6 steps for quick analysis
+  - Fine mode: 10-step intervals around divergence
+
+#### 14.4.2 Analyze Case 2 (Banana on Plate)
+
+**Problem**: Case 2 (`case_20260119_132946_no_ha_plate`) has NOT been analyzed with per-camera cross-attention.
+
+**Action**: Run cross-attention capture on case 2 and compare with case 1 (halluc) and case 3 (normal).
+
+**Expected insight**: If case 2 (banana present but far) shows DIFFERENT attention pattern than case 1 (banana close), position matters. If similar, something else triggers hallucination.
+
+### 14.5 Phase 2b-2: Attention-to-Action Mechanistic Analysis
+
+#### 14.5.1 Velocity Field Analysis
+
+**Key insight from research**: SmolVLA uses flow matching where `x_t = x_t + dt * v_t`. The velocity field `v_t` directly determines action direction.
+
+**New analysis tool**: `velocity_attention_correlation.py`
+
+```python
+# For each denoising step:
+#   1. Capture attention weights (per-camera breakdown)
+#   2. Capture velocity field v_t
+#   3. Compute correlation: does high right_wrist attention → specific v_t direction?
+
+# Key metric: velocity_direction vs attention_focus
+# If correlated: attention directly influences action direction
+```
+
+#### 14.5.2 Denoising Trajectory Divergence
+
+**Problem**: We know action diverges at step ~210, but at which DENOISING step (0-9) does the hallucination action emerge?
+
+**Action**: Run `denoising_trajectory_capture.py` (tool exists but not run)
+
+**Expected output**:
+- Trajectory plot: x_t evolution through 10 denoising steps
+- Compare halluc vs normal: at which denoising step does trajectory split?
+- If hallucination emerges early (steps 0-3): attention is the cause
+- If hallucination emerges late (steps 7-9): flow matching is adding it
+
+#### 14.5.3 Per-Action-Token Attention Analysis
+
+**Hypothesis**: Different action tokens (representing different joints) may attend to different cameras.
+
+**Analysis**:
+```python
+# For each action token i in [0-49]:
+#   attention_to_right_wrist[i] = attention_weights[i, 128:192].sum()
+#
+# If action tokens for LEFT ARM joints have high right_wrist attention:
+# → Model learned spurious correlation: right_wrist visual → left arm action
+```
+
+### 14.6 Phase 2b-3: Dataset-Model Connection
+
+#### 14.6.1 Action Distribution Clustering
+
+**Question**: Are hallucination actions similar to training data "position replay" actions?
+
+**Analysis**:
+```python
+# 1. Extract all post-completion actions from training data
+# 2. Cluster into: "stay still" vs "move back" patterns
+# 3. Check which cluster hallucination actions belong to
+# 4. If halluc actions match "move back" cluster → model replaying learned pattern
+```
+
+#### 14.6.2 Visual Context → Action Mapping in Training Data
+
+**Question**: In training data, when objects are visible after task completion, what actions were recorded?
+
+**Analysis**:
+- Find training episodes where:
+  - Task is complete (object placed)
+  - Other objects visible in right_wrist camera
+  - What do the recorded actions show?
+- If training shows "reach back" in these scenarios → dataset bias confirmed
+
+#### 14.6.3 KV Cache State Analysis
+
+**Question**: Does the KV cache retain "memory" of bottle location from earlier frames?
+
+**Tool**: `kv_cache_analysis.py` (exists but not run)
+
+**Analysis**:
+- Extract KV cache embeddings at step 200 (just before divergence)
+- Compare with step 0 (start of episode)
+- Check if bottle-related embeddings persist in cache after bottle moved
+
+### 14.7 Phase 2b-4: Layer-wise Causal Tracing
+
+#### 14.7.1 Activation Patching (From Research)
+
+**Method**: Based on "Devils in Middle Layers" paper (CVPR 2025) - hallucination often emerges in middle layers (8-12).
+
+**Experiment**:
+```python
+# For each layer L in [0, 4, 8, 12, 16]:
+#   1. Run normal case, capture activations at layer L
+#   2. Run halluc case with patched activations from normal at layer L
+#   3. Measure action change
+#   4. If action normalizes → layer L is critical for hallucination
+```
+
+**Expected finding**: If patching layer 8-10 fixes hallucination, that's where banana attention → wrong action mapping happens.
+
+#### 14.7.2 Attention Head Specialization
+
+**Question**: Do specific attention heads focus on specific cameras?
+
+**Analysis**:
+```python
+# For each head H in [0-31]:
+#   compute: head_H_to_right_wrist = attention[head=H, :, 128:192].mean()
+#
+# Find "right_wrist specialist" heads
+# Check if these heads are more active in hallucination case
+```
+
+### 14.8 Implementation Priority
+
+| # | Analysis | Purpose | Effort | Expected Value |
+|---|----------|---------|--------|----------------|
+| 1 | **Case 2 analysis** | Compare banana-on-plate (no halluc) with banana-on-table (halluc) | LOW | HIGH |
+| 2 | **Fine-grained temporal** | Capture steps 100-250 at 10-step intervals | LOW | HIGH |
+| 3 | **Velocity field correlation** | Trace attention → v_t → action | MEDIUM | HIGH |
+| 4 | **Denoising trajectory** | Find which denoising step diverges | LOW | MEDIUM |
+| 5 | **Per-action-token attention** | Which joints attend where | MEDIUM | MEDIUM |
+| 6 | **Dataset action clustering** | Match halluc actions to training patterns | MEDIUM | HIGH |
+| 7 | **Layer-wise patching** | Find critical layer | HIGH | HIGH |
+
+### 14.9 Files to Create/Modify
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `cross_attention_capture.py` | MODIFY | Add `--steps` parameter for fine granularity |
+| `velocity_attention_correlation.py` | CREATE | Capture v_t + attention correlation |
+| `compare_all_cases.py` | CREATE | 3-way comparison visualization |
+| `denoising_trajectory_analysis.py` | CREATE | Analyze x_t trajectory through denoising |
+| `infer_smolvla_bimanual.py` or `trace_inference.py` | MODIFY | Integrate capture hooks for live data |
+
+### 14.10 Success Criteria
+
+1. **Temporal clarity**: Identify exact step where attention diverges (not just "around 200")
+2. **Case comparison**: Explain why case 2 (banana on plate) doesn't hallucinate
+3. **Mechanistic link**: Show correlation between attention pattern and velocity direction
+4. **Actionable insight**: Identify whether fix should target:
+   - Dataset (add idle frames)
+   - Model (attention masking)
+   - Inference (termination detection)
+
+### 14.11 Research References
+
+Key papers informing this approach:
+- **"Devils in Middle Layers of Large Vision-Language Models"** (CVPR 2025) - Hallucination often emerges in middle layers
+- **"ConceptAttention: Diffusion Transformers Learn Highly Interpretable Features"** (2025) - DiT attention encodes interpretable spatial concepts
+- **"Mechanistic interpretability for steering vision-language-action models"** (2025) - First VLA steering framework
+- **"Flow Matching for Generative Modeling"** (NeurIPS 2024) - Flow matching trajectory analysis
