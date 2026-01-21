@@ -343,8 +343,8 @@ def visualize_pca(all_case_features: list, output_dir: Path):
 
     # Save PCA info
     pca_info = {
-        "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
-        "total_variance_explained": sum(pca.explained_variance_ratio_)
+        "explained_variance_ratio": [float(x) for x in pca.explained_variance_ratio_],
+        "total_variance_explained": float(sum(pca.explained_variance_ratio_))
     }
     with open(output_dir / "pca_info.json", "w") as f:
         json.dump(pca_info, f, indent=2)

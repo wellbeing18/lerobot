@@ -789,7 +789,7 @@ def main():
         total_steps=sum(len(t) for t in trajectories),
         phase_counts=phase_counts,
         phase_avg_duration=phase_durations,
-        pca_variance_explained=pca.explained_variance_ratio_.tolist(),
+        pca_variance_explained=[float(x) for x in pca.explained_variance_ratio_],
         segment_embeddings=embeddings,
         segment_phases=[s.phase for s in all_segments],
         halluc_embedding=halluc_emb,
