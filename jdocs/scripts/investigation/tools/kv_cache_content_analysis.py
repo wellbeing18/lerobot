@@ -55,7 +55,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 PATCHES_PER_CAMERA = 64
 NUM_CAMERAS = 3
 IMAGE_SIZE = 512
-CAMERA_NAMES = ["head", "left_wrist", "right_wrist"]
+# Camera names as they appear in case directories
+CAMERA_FILE_NAMES = ["head", "left_wrist", "right_wrist"]
+# Camera names as expected by the model config
+CAMERA_MODEL_NAMES = ["camera1", "camera2", "camera3"]
 
 # Token indices
 HEAD_CAMERA_START = 0
@@ -191,8 +194,8 @@ class KVCacheExtractor:
 
         # Load images
         images = []
-        for camera_name in CAMERA_NAMES:
-            image_path = case_path / "images" / f"step_{step:04d}_{camera_name}.jpg"
+        for camera_file_name in CAMERA_FILE_NAMES:
+            image_path = case_path / "images" / f"step_{step:04d}_{camera_file_name}.jpg"
             if not image_path.exists():
                 image_path = case_path / "images" / f"step_{step:04d}_{camera_name}.png"
 
@@ -258,11 +261,13 @@ class KVCacheExtractor:
         batch = {
             OBS_STATE: state.to(self.device),
             OBS_LANGUAGE_TOKENS: tokenized["input_ids"].to(self.device),
-            OBS_LANGUAGE_ATTENTION_MASK: tokenized["attention_mask"].to(self.device),
+            # Convert attention_mask to boolean (tokenizer returns int64, but model expects bool)
+            OBS_LANGUAGE_ATTENTION_MASK: tokenized["attention_mask"].bool().to(self.device),
         }
 
-        for idx, camera_name in enumerate(CAMERA_NAMES):
-            key = f"observation.images.{camera_name}"
+        # Use model's expected camera names (camera1, camera2, camera3)
+        for idx, camera_model_name in enumerate(CAMERA_MODEL_NAMES):
+            key = f"observation.images.{camera_model_name}"
             batch[key] = images[idx].to(self.device)
 
         return batch
@@ -300,10 +305,13 @@ class KVCacheExtractor:
             )
 
         # Extract and analyze KV cache
+        # past_key_values is a dict: {layer_idx: {"key_states": tensor, "value_states": tensor}}
+        # key_states shape: [batch, seq_len, num_kv_heads, head_dim] (grouped query attention)
         num_layers = len(past_key_values)
-        first_key = past_key_values[0][0]
-        num_heads = first_key.shape[1]
-        seq_len = first_key.shape[2]
+        first_layer = past_key_values[0]
+        first_key = first_layer["key_states"]
+        seq_len = first_key.shape[1]
+        num_heads = first_key.shape[2]
         head_dim = first_key.shape[3]
 
         # Stack all layers
@@ -311,25 +319,29 @@ class KVCacheExtractor:
         all_values = []
         layer_stats = []
 
-        for layer_idx, (key_states, value_states) in enumerate(past_key_values):
+        for layer_idx in range(num_layers):
+            layer_data = past_key_values[layer_idx]
+            key_states = layer_data["key_states"]
+            value_states = layer_data["value_states"]
             # Convert to numpy
             # Convert to float32 before numpy (BFloat16 not supported by numpy)
-            key_np = key_states[0].float().cpu().numpy()  # [num_heads, seq_len, head_dim]
+            # Shape after [0]: [seq_len, num_kv_heads, head_dim]
+            key_np = key_states[0].float().cpu().numpy()
             value_np = value_states[0].float().cpu().numpy()
 
             all_keys.append(key_np)
             all_values.append(value_np)
 
-            # Compute per-region norms for keys
+            # Compute per-region norms for keys (slicing on seq_len dimension)
             key_region_norms = {}
             for region_name, (start, end) in TOKEN_REGIONS.items():
-                region_key = key_np[:, start:end, :]  # [heads, region_len, dim]
+                region_key = key_np[start:end, :, :]  # [region_len, heads, dim]
                 key_region_norms[region_name] = float(np.linalg.norm(region_key))
 
             # Compute per-region norms for values
             value_region_norms = {}
             for region_name, (start, end) in TOKEN_REGIONS.items():
-                region_value = value_np[:, start:end, :]
+                region_value = value_np[start:end, :, :]
                 value_region_norms[region_name] = float(np.linalg.norm(region_value))
 
             stats = LayerKVStats(
@@ -397,20 +409,20 @@ def compare_kv_caches(kv_a: CaseKVCache, kv_b: CaseKVCache) -> KVCacheComparison
         value_l2 = float(np.linalg.norm(value_a - value_b))
         value_cosine = cosine_similarity(value_a, value_b)
 
-        # Per-region L2 for keys
+        # Per-region L2 for keys (shape: [seq_len, num_heads, head_dim])
         key_region_l2 = {}
         for region_name, (start, end) in TOKEN_REGIONS.items():
-            region_key_a = key_a[:, start:end, :]
-            region_key_b = key_b[:, start:end, :]
+            region_key_a = key_a[start:end, :, :]
+            region_key_b = key_b[start:end, :, :]
             l2 = float(np.linalg.norm(region_key_a - region_key_b))
             key_region_l2[region_name] = l2
             region_total_l2[region_name] += l2
 
-        # Per-region L2 for values
+        # Per-region L2 for values (shape: [seq_len, num_heads, head_dim])
         value_region_l2 = {}
         for region_name, (start, end) in TOKEN_REGIONS.items():
-            region_value_a = value_a[:, start:end, :]
-            region_value_b = value_b[:, start:end, :]
+            region_value_a = value_a[start:end, :, :]
+            region_value_b = value_b[start:end, :, :]
             l2 = float(np.linalg.norm(region_value_a - region_value_b))
             value_region_l2[region_name] = l2
             region_total_l2[region_name] += l2

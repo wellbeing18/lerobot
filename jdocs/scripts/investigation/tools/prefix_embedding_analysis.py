@@ -80,7 +80,12 @@ TOTAL_IMAGE_TOKENS = 192
 TOTAL_LANGUAGE_TOKENS = 48
 TOTAL_PREFIX_TOKENS = 241
 
-CAMERA_NAMES = ["head", "left_wrist", "right_wrist"]
+# Camera names as they appear in case directories
+CAMERA_FILE_NAMES = ["head", "left_wrist", "right_wrist"]
+# Camera names as expected by the model config
+CAMERA_MODEL_NAMES = ["camera1", "camera2", "camera3"]
+# Mapping from file name to model name
+CAMERA_NAME_MAPPING = dict(zip(CAMERA_FILE_NAMES, CAMERA_MODEL_NAMES))
 
 TOKEN_REGIONS = {
     "head_camera": (HEAD_CAMERA_START, HEAD_CAMERA_END),
@@ -169,8 +174,8 @@ class PrefixEmbeddingExtractor:
 
         # Load images
         images = []
-        for camera_name in CAMERA_NAMES:
-            image_path = case_path / "images" / f"step_{step:04d}_{camera_name}.jpg"
+        for camera_file_name in CAMERA_FILE_NAMES:
+            image_path = case_path / "images" / f"step_{step:04d}_{camera_file_name}.jpg"
             if not image_path.exists():
                 image_path = case_path / "images" / f"step_{step:04d}_{camera_name}.png"
 
@@ -236,12 +241,13 @@ class PrefixEmbeddingExtractor:
         batch = {
             OBS_STATE: state.to(self.device),
             OBS_LANGUAGE_TOKENS: tokenized["input_ids"].to(self.device),
-            OBS_LANGUAGE_ATTENTION_MASK: tokenized["attention_mask"].to(self.device),
+            # Convert attention_mask to boolean (tokenizer returns int64, but model expects bool)
+            OBS_LANGUAGE_ATTENTION_MASK: tokenized["attention_mask"].bool().to(self.device),
         }
 
-        # Add images to batch
-        for idx, camera_name in enumerate(CAMERA_NAMES):
-            key = f"observation.images.{camera_name}"
+        # Add images to batch using model's expected camera names
+        for idx, camera_model_name in enumerate(CAMERA_MODEL_NAMES):
+            key = f"observation.images.{camera_model_name}"
             batch[key] = images[idx].to(self.device)
 
         return batch

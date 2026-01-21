@@ -54,7 +54,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 PATCHES_PER_CAMERA = 64
 IMAGE_SIZE = 512
-CAMERA_NAMES = ["head", "left_wrist", "right_wrist"]
+# Camera names as they appear in case directories
+CAMERA_FILE_NAMES = ["head", "left_wrist", "right_wrist"]
+# Camera names as expected by the model config
+CAMERA_MODEL_NAMES = ["camera1", "camera2", "camera3"]
 CHUNK_SIZE = 50  # Action chunk size
 ACTION_DIM = 32  # Padded action dimension for SmolVLA
 NUM_DENOISING_STEPS = 10
@@ -304,8 +307,8 @@ class DenoisingExtractor:
 
         # Load images
         images = []
-        for camera_name in CAMERA_NAMES:
-            image_path = case_path / "images" / f"step_{step:04d}_{camera_name}.jpg"
+        for camera_file_name in CAMERA_FILE_NAMES:
+            image_path = case_path / "images" / f"step_{step:04d}_{camera_file_name}.jpg"
             if not image_path.exists():
                 image_path = case_path / "images" / f"step_{step:04d}_{camera_name}.png"
 
@@ -371,11 +374,13 @@ class DenoisingExtractor:
         batch = {
             OBS_STATE: state.to(self.device),
             OBS_LANGUAGE_TOKENS: tokenized["input_ids"].to(self.device),
-            OBS_LANGUAGE_ATTENTION_MASK: tokenized["attention_mask"].to(self.device),
+            # Convert attention_mask to boolean (tokenizer returns int64, but model expects bool)
+            OBS_LANGUAGE_ATTENTION_MASK: tokenized["attention_mask"].bool().to(self.device),
         }
 
-        for idx, camera_name in enumerate(CAMERA_NAMES):
-            key = f"observation.images.{camera_name}"
+        # Use model's expected camera names (camera1, camera2, camera3)
+        for idx, camera_model_name in enumerate(CAMERA_MODEL_NAMES):
+            key = f"observation.images.{camera_model_name}"
             batch[key] = images[idx].to(self.device)
 
         return batch
