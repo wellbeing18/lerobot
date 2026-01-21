@@ -153,7 +153,8 @@ class VisionFeatureExtractor:
                 pixel_values=image_tensor.to(dtype=vision_model.dtype)
             ).last_hidden_state
 
-            return hidden_states.cpu().numpy()
+            # Convert to float32 before numpy (BFloat16 not supported by numpy)
+            return hidden_states.float().cpu().numpy()
 
     def extract_post_connector_features(self, image_tensor: torch.Tensor) -> np.ndarray:
         """Extract features after multi_modal_projector (connector)."""
@@ -163,7 +164,8 @@ class VisionFeatureExtractor:
             # Use the embed_image method which includes connector
             features = vlm_with_expert.embed_image(image_tensor)
 
-            return features.cpu().numpy()
+            # Convert to float32 before numpy (BFloat16 not supported by numpy)
+            return features.float().cpu().numpy()
 
     def extract_case_features(self, case_dir: str, step: int) -> CaseFeatures:
         """Extract features for all cameras at a given step."""

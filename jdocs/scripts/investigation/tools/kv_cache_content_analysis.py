@@ -312,8 +312,9 @@ class KVCacheExtractor:
 
         for layer_idx, (key_states, value_states) in enumerate(past_key_values):
             # Convert to numpy
-            key_np = key_states[0].cpu().numpy()  # [num_heads, seq_len, head_dim]
-            value_np = value_states[0].cpu().numpy()
+            # Convert to float32 before numpy (BFloat16 not supported by numpy)
+            key_np = key_states[0].float().cpu().numpy()  # [num_heads, seq_len, head_dim]
+            value_np = value_states[0].float().cpu().numpy()
 
             all_keys.append(key_np)
             all_values.append(value_np)

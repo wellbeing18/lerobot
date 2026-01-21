@@ -264,7 +264,8 @@ class PrefixEmbeddingExtractor:
             )
 
         # prefix_embs shape: [batch, seq_len, hidden_dim]
-        prefix_np = prefix_embs[0].cpu().numpy()
+        # Convert to float32 before numpy (BFloat16 not supported by numpy)
+        prefix_np = prefix_embs[0].float().cpu().numpy()
 
         return CasePrefixEmbedding(
             case_name=case_data["case_name"],

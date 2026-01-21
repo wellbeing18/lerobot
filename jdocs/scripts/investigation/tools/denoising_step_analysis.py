@@ -194,8 +194,9 @@ class DenoisingCaptureHook:
             return
 
         # x_t and v_t shape: [batch, 50, 32]
-        x_t_np = x_t[0].cpu().numpy()  # [50, 32]
-        v_t_np = v_t[0].cpu().numpy()
+        # Convert to float32 before numpy (BFloat16 not supported by numpy)
+        x_t_np = x_t[0].float().cpu().numpy()  # [50, 32]
+        v_t_np = v_t[0].float().cpu().numpy()
 
         # Compute per-position means
         x_t_mean = x_t_np.mean(axis=1).tolist()  # [50]
