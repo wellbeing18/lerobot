@@ -1,13 +1,25 @@
 # SmolVLA Hallucination Mechanism Findings
 
-**Status**: Complete - Experiment Results Analyzed
+**Status**: Complete - Experiment Results Analyzed (Updated with Corrected Timing)
 **Last Updated**: 2026-01-21
 
 ## Executive Summary
 
-This document contains findings from tracing the complete SmolVLA pipeline to identify WHERE and WHY divergence occurs between hallucination and normal cases at inference step 200 (post-task completion).
+This document contains findings from tracing the complete SmolVLA pipeline to identify WHERE and WHY divergence occurs between hallucination and normal cases.
 
-**Key Finding**: The banana presence in the right wrist camera creates a visual feature difference that propagates through the KV cache and immediately drives a different velocity field from denoising step 0. The hallucination trajectory (RAMP_UP, moving toward empty space) is established within the first denoising step.
+### Critical Timing Correction
+
+**Previous Analysis**: Analyzed step 200 arbitrarily
+**Corrected Analysis**: Trace analysis reveals actual divergence starts at **step 208-210**
+
+| Step | Halluc action_delta | Normal action_delta | Divergence |
+|------|---------------------|---------------------|------------|
+| 200 | 2.4 | 2.3 | Similar |
+| 208 | 5.4 | 2.2 | **DIVERGES** |
+| 211+ | 10-13 | ~2.3 | Large gap |
+| 225-240 | Gripper opens | Gripper stable | Robot trying to pick |
+
+**Key Finding**: The banana presence in the right wrist camera creates a visual feature difference that propagates through the KV cache and immediately drives a different velocity field from denoising step 0. The hallucination trajectory (RAMP_UP, moving toward empty space) is established within the first denoising step. The divergence becomes behaviorally visible starting at step 208.
 
 ---
 
@@ -248,9 +260,83 @@ ACTION OUTPUT DIFFERENCE
 
 ---
 
+---
+
+## Part 6: Three-Case Comparison (All Cases)
+
+### Cases Analyzed
+
+All three collected inference cases were compared:
+
+1. **Hallucination** (`case_20260119_131914_ha_bana_table`): Banana on table near workspace - robot attempts to pick empty space
+2. **Normal Plate** (`case_20260119_132946_no_ha_plate`): Banana on plate far from workspace - robot stays still
+3. **Normal Clean** (`case_20260119_133142_no_ha_no_other_obj`): No distractors - robot stays still
+
+### Prefix Embedding Comparison at Step 200 (Pre-Divergence)
+
+| Comparison | Total L2 | Cosine Sim | Most Different Region |
+|------------|----------|------------|----------------------|
+| Halluc vs Normal Plate | 1,617,345 | 0.607 | Left wrist |
+| Halluc vs Normal Clean | 1,233,693 | 0.762 | **Right wrist** |
+| Normal Plate vs Normal Clean | 1,408,495 | 0.660 | Left wrist |
+
+### Prefix Embedding Comparison at Step 250 (During Hallucination)
+
+| Comparison | Total L2 | Cosine Sim | Most Different Region |
+|------------|----------|------------|----------------------|
+| Halluc vs Normal Plate | 1,739,796 | 0.566 | Left wrist |
+| Halluc vs Normal Clean | 1,756,853 | 0.558 | Left wrist |
+| **Normal Plate vs Normal Clean** | **961,699** | **0.843** | Right wrist |
+
+**Key Observation**: At step 250, the two normal cases are much more similar to each other (cosine 0.84) than either is to the hallucination case (cosine ~0.56). This confirms the hallucination case has diverged significantly from normal behavior.
+
+---
+
+## Part 7: Integrated Visualization
+
+### New Visualizations Generated
+
+A comprehensive visualization tool was created that combines:
+1. **3-camera images** for all cases at key timesteps
+2. **Trajectory distribution** (PCA of training data) showing where inference trajectories fall
+3. **Side-by-side comparison** across divergence timeline
+
+**Output directory**: `logs/investigation/traj_attn_overlay_step200/`
+
+| File | Description |
+|------|-------------|
+| `combined_step_0200.png` | Pre-divergence: all cameras + trajectory PCA for 3 cases |
+| `combined_step_0250.png` | During hallucination: shows robot arm has moved in halluc case |
+| `side_by_side_comparison.png` | Head + Right wrist across steps 200, 250, 300 |
+
+### Training Trajectory Analysis
+
+- **40 yogurt-related episodes** loaded from training dataset
+- **305 trajectory segments** extracted and embedded via PCA (83% variance explained)
+- Both hallucination and normal trajectories fall near **TRANSPORT** phase in training distribution
+- This explains why the model generates movement trajectories - it has never seen "post-completion with distractor visible" scenarios
+
+---
+
+## Updated Conclusions
+
+1. **The hallucination is vision-driven**: The banana presence in the right wrist camera is the root cause
+
+2. **Divergence timing is step 208-210**: Not step 200 as initially analyzed. Action delta spikes from ~2 to ~5 at step 208, then to 10+ by step 211.
+
+3. **Gripper behavior confirms hallucination**: At step 225-240, the hallucination case opens its gripper (attempting to grasp), while normal cases maintain stable gripper state.
+
+4. **Both normal cases behave similarly**: At step 250, normal cases have cosine similarity 0.84, confirming they produce consistent "stay still" behavior.
+
+5. **The trajectory shape is determined immediately**: By denoising step 1, the RAMP_UP shape is established in the hallucination case.
+
+6. **Both inference cases are out-of-distribution**: The post-completion state doesn't clearly map to IDLE trajectories in training.
+
+---
+
 ## Next Steps
 
-1. Synthesize findings in `hallucination_root_cause_synthesis.md`
+1. ~~Synthesize findings in `hallucination_root_cause_synthesis.md`~~ (Completed in this document)
 2. Design mitigation strategies:
    - Add more post-completion IDLE training data
    - Implement distractor-robust visual encoding
