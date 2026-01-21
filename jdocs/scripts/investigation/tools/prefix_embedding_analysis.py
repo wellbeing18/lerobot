@@ -252,8 +252,10 @@ class PrefixEmbeddingExtractor:
         batch = self.prepare_batch(case_data)
 
         # Prepare images and state for embed_prefix
-        images, img_masks = self.model.model.prepare_images(batch)
-        state = self.model.model.prepare_state(batch)
+        # prepare_images and prepare_state are on SmolVLAPolicy (self.model)
+        # embed_prefix is on VLAFlowMatching (self.model.model)
+        images, img_masks = self.model.prepare_images(batch)
+        state = self.model.prepare_state(batch)
         lang_tokens = batch["observation.language.tokens"]
         lang_masks = batch["observation.language.attention_mask"]
 
