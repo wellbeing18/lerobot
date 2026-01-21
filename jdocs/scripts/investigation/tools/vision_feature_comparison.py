@@ -519,18 +519,31 @@ def generate_report(all_case_features: list, comparisons: list, output_dir: Path
 # ============================================================================
 
 def main():
+    # Import config for defaults
+    from investigation_config import (
+        get_default_checkpoint, get_halluc_vs_clean, get_output_dir, DEFAULT_STEP, DEVICE
+    )
+
     parser = argparse.ArgumentParser(description="Compare vision features between cases")
-    parser.add_argument("--checkpoint", required=True, help="Path to SmolVLA checkpoint")
-    parser.add_argument("--case-dirs", nargs="+", required=True, help="Paths to case directories")
-    parser.add_argument("--step", type=int, default=200, help="Inference step to analyze")
-    parser.add_argument("--output-dir", default="outputs/vision_feature_comparison",
-                       help="Output directory")
-    parser.add_argument("--device", default="cuda", help="Device to use")
+    parser.add_argument("--checkpoint", default=get_default_checkpoint(),
+                       help="Path to SmolVLA checkpoint")
+    parser.add_argument("--case-dirs", nargs="+", default=get_halluc_vs_clean(),
+                       help="Paths to case directories")
+    parser.add_argument("--step", type=int, default=DEFAULT_STEP,
+                       help="Inference step to analyze")
+    parser.add_argument("--output-dir", default=None,
+                       help="Output directory (default: auto-generated with timestamp)")
+    parser.add_argument("--device", default=DEVICE, help="Device to use")
 
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    # Auto-generate output dir if not specified
+    if args.output_dir is None:
+        output_dir = get_output_dir("vision_features")
+    else:
+        output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory: {output_dir}")
 
     # Initialize extractor
     extractor = VisionFeatureExtractor(args.checkpoint, args.device)

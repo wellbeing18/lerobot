@@ -662,20 +662,40 @@ def generate_report(analysis: TrajectoryAnalysis, output_dir: Path,
 # ============================================================================
 
 def main():
+    # Import config for defaults
+    from investigation_config import (
+        get_output_dir, DATASET_PATH, TASK_FILTER, CASE_HALLUC, CASE_NORMAL_CLEAN, STEP_RANGE
+    )
+
+    default_halluc_trace = str(CASE_HALLUC / "trace.jsonl")
+    default_normal_trace = str(CASE_NORMAL_CLEAN / "trace.jsonl")
+    default_step_range = f"{STEP_RANGE[0]},{STEP_RANGE[1]}"
+
     parser = argparse.ArgumentParser(description="Visualize trajectory distribution")
-    parser.add_argument("--dataset", required=True, help="Path to LeRobot dataset")
-    parser.add_argument("--task-filter", default=None, help="Filter episodes by task name")
-    parser.add_argument("--halluc-trace", default=None, help="Path to hallucination trace.jsonl")
-    parser.add_argument("--normal-trace", default=None, help="Path to normal trace.jsonl")
-    parser.add_argument("--step-range", default=None, help="Step range for inference traces (e.g., '200,300')")
-    parser.add_argument("--max-episodes", type=int, default=100, help="Maximum episodes to load")
-    parser.add_argument("--output-dir", default="outputs/trajectory_distribution",
-                       help="Output directory")
+    parser.add_argument("--dataset", default=str(DATASET_PATH),
+                       help="Path to LeRobot dataset")
+    parser.add_argument("--task-filter", default=TASK_FILTER,
+                       help="Filter episodes by task name")
+    parser.add_argument("--halluc-trace", default=default_halluc_trace,
+                       help="Path to hallucination trace.jsonl")
+    parser.add_argument("--normal-trace", default=default_normal_trace,
+                       help="Path to normal trace.jsonl")
+    parser.add_argument("--step-range", default=default_step_range,
+                       help="Step range for inference traces (e.g., '200,300')")
+    parser.add_argument("--max-episodes", type=int, default=100,
+                       help="Maximum episodes to load")
+    parser.add_argument("--output-dir", default=None,
+                       help="Output directory (default: auto-generated with timestamp)")
 
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    # Auto-generate output dir if not specified
+    if args.output_dir is None:
+        output_dir = get_output_dir("trajectory_dist")
+    else:
+        output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory: {output_dir}")
 
     # Parse step range
     step_range = None

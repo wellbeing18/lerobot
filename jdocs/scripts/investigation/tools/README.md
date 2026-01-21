@@ -2,30 +2,46 @@
 
 ## Quick Start
 
+All tools have sensible defaults - just run them without arguments:
+
 ```bash
 cd jdocs/scripts/investigation/tools
 
-# Check configuration
-python investigation_config.py
+# Run any tool with defaults (checkpoint, case-dirs, output-dir all pre-configured)
+python vision_feature_comparison.py
+python prefix_embedding_analysis.py
+python kv_cache_content_analysis.py
+python denoising_step_analysis.py
+python trajectory_distribution_visualization.py
 ```
+
+Output directories are auto-generated with timestamps, e.g.:
+- `logs/investigation/vision_features_20260121_143052/`
+- `logs/investigation/kv_cache_20260121_143105/`
 
 ## Configuration
 
-All paths are defined in `investigation_config.py`:
+All defaults are defined in `investigation_config.py`:
 
-| Setting | Value |
-|---------|-------|
+| Setting | Default Value |
+|---------|---------------|
 | Checkpoint | `outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model` |
-| Case Base | `logs/yogurt_banana_leftarm/` |
+| Case Dirs | halluc + normal_clean (2 cases) |
 | Output Base | `logs/investigation/` |
 | Dataset | `datasets_bimanuel/multitasks` |
+| Task Filter | `yogurt` |
 | Default Step | 200 (post-task completion) |
+
+```bash
+# Check configuration
+python investigation_config.py
+```
 
 ### Available Cases
 
 | Case | Directory | Description |
 |------|-----------|-------------|
-| `halluc` | `case_20260119_131914_ha_bana_table` | **Hallucination** - banana on table near workspace |
+| `halluc` | `case_20260119_131914_ha_bana_table` | **Hallucination** - banana on table |
 | `normal_plate` | `case_20260119_132946_no_ha_plate` | Normal - banana on plate (far) |
 | `normal_clean` | `case_20260119_133142_no_ha_no_other_obj` | Normal - clean workspace |
 
@@ -33,58 +49,28 @@ All paths are defined in `investigation_config.py`:
 
 ## Running the Tools
 
-### Phase A: Offline Analysis (No live robot needed)
+### Phase A: Offline Analysis
 
 #### 1. Vision Feature Comparison
 
-Compares SigLIP visual features between cases.
-
 ```bash
-# Compare halluc vs clean (recommended for clearest comparison)
-python vision_feature_comparison.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/vision_feature_comparison
+# With all defaults (recommended)
+python vision_feature_comparison.py
 
-# Compare all 3 cases
-python vision_feature_comparison.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_132946_no_ha_plate \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/vision_feature_comparison
+# Override specific options if needed
+python vision_feature_comparison.py --step 250
+python vision_feature_comparison.py --output-dir /custom/path
 ```
 
-**Outputs:**
-- `comparisons.json` - Raw comparison data
-- `pca_visualization.png` - PCA of patch embeddings
-- `comparison_matrix.png` - Similarity matrix
-- `spatial_diff_*.png` - Per-camera difference heatmaps
-- `report.md` - Summary report
+**Outputs:** `comparisons.json`, `pca_visualization.png`, `comparison_matrix.png`, `spatial_diff_*.png`, `report.md`
 
 #### 2. Prefix Embedding Analysis
 
-Analyzes the combined prefix embedding (vision + language + state).
-
 ```bash
-# Compare halluc vs clean
-python prefix_embedding_analysis.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/prefix_embedding_analysis
+python prefix_embedding_analysis.py
 ```
 
-**Outputs:**
-- `comparisons.json` - Per-token L2 distances
-- `token_distances_*.png` - Token distance heatmaps
-- `region_comparison.png` - Region-level comparison
-- `pca_prefix_embeddings.png` - PCA visualization
-- `report.md` - Summary report
+**Outputs:** `comparisons.json`, `token_distances_*.png`, `region_comparison.png`, `pca_prefix_embeddings.png`, `report.md`
 
 ---
 
@@ -92,44 +78,19 @@ python prefix_embedding_analysis.py \
 
 #### 3. KV Cache Content Analysis
 
-Analyzes KV cache differences by layer and token region.
-
 ```bash
-python kv_cache_content_analysis.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/kv_cache_analysis
+python kv_cache_content_analysis.py
 ```
 
-**Outputs:**
-- `comparisons.json` - Per-layer KV statistics
-- `layer_comparison_*.png` - Per-layer breakdown
-- `region_by_layer_heatmap_*.png` - [Layer x Region] heatmap
-- `region_totals.png` - Total by region
-- `report.md` - Summary report
+**Outputs:** `comparisons.json`, `layer_comparison_*.png`, `region_by_layer_heatmap_*.png`, `region_totals.png`, `report.md`
 
 #### 4. Denoising Step Analysis
 
-Traces trajectory emergence through 10 denoising steps.
-
 ```bash
-python denoising_step_analysis.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/denoising_analysis
+python denoising_step_analysis.py
 ```
 
-**Outputs:**
-- `analyses.json` - Per-step metrics
-- `comparisons.json` - Case comparison data
-- `trajectory_emergence_*.png` - How shapes emerge
-- `denoising_comparison_*.png` - Side-by-side comparison
-- `joint_evolution_grid.png` - Joint values heatmap
-- `report.md` - Summary report
+**Outputs:** `analyses.json`, `comparisons.json`, `trajectory_emergence_*.png`, `denoising_comparison_*.png`, `joint_evolution_grid.png`, `report.md`
 
 ---
 
@@ -137,26 +98,11 @@ python denoising_step_analysis.py \
 
 #### 5. Trajectory Distribution Visualization
 
-Visualizes training trajectory space and where inference cases lie.
-
 ```bash
-python trajectory_distribution_visualization.py \
-    --dataset datasets_bimanuel/multitasks \
-    --task-filter "yogurt" \
-    --halluc-trace logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table/trace.jsonl \
-    --normal-trace logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj/trace.jsonl \
-    --step-range "200,300" \
-    --max-episodes 100 \
-    --output-dir logs/investigation/trajectory_distribution
+python trajectory_distribution_visualization.py
 ```
 
-**Outputs:**
-- `analysis.json` - Full analysis data
-- `3d_trajectory_distribution.png` - 3D PCA (matplotlib)
-- `3d_trajectory_distribution.html` - Interactive 3D (plotly)
-- `2d_projections.png` - 2D views
-- `phase_distribution.png` - Phase histogram
-- `report.md` - Summary report
+**Outputs:** `analysis.json`, `3d_trajectory_distribution.png`, `3d_trajectory_distribution.html`, `2d_projections.png`, `phase_distribution.png`, `report.md`
 
 ---
 
@@ -165,69 +111,38 @@ python trajectory_distribution_visualization.py \
 ```bash
 cd jdocs/scripts/investigation/tools
 
-# Create output directories
-mkdir -p logs/investigation/{vision_feature_comparison,prefix_embedding_analysis,kv_cache_analysis,denoising_analysis,trajectory_distribution}
-
-# Phase A
-python vision_feature_comparison.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/vision_feature_comparison
-
-python prefix_embedding_analysis.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/prefix_embedding_analysis
-
-# Phase B
-python kv_cache_content_analysis.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/kv_cache_analysis
-
-python denoising_step_analysis.py \
-    --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
-    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
-                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj \
-    --step 200 \
-    --output-dir logs/investigation/denoising_analysis
-
-# Phase C
-python trajectory_distribution_visualization.py \
-    --dataset datasets_bimanuel/multitasks \
-    --task-filter "yogurt" \
-    --halluc-trace logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table/trace.jsonl \
-    --normal-trace logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj/trace.jsonl \
-    --step-range "200,300" \
-    --output-dir logs/investigation/trajectory_distribution
+# Just run all tools - everything is pre-configured!
+python vision_feature_comparison.py
+python prefix_embedding_analysis.py
+python kv_cache_content_analysis.py
+python denoising_step_analysis.py
+python trajectory_distribution_visualization.py
 ```
 
 ---
 
-## Which Cases to Compare?
+## Customizing Runs
 
-### For clearest hallucination comparison (recommended):
+### Compare all 3 cases (not just halluc vs clean)
 
-Compare **halluc** vs **normal_clean** (2 folders):
-- Hallucination case: banana on table (causes hallucination)
-- Normal case: clean workspace (no distractors, stays still)
+```bash
+python vision_feature_comparison.py \
+    --case-dirs logs/yogurt_banana_leftarm/case_20260119_131914_ha_bana_table \
+                logs/yogurt_banana_leftarm/case_20260119_132946_no_ha_plate \
+                logs/yogurt_banana_leftarm/case_20260119_133142_no_ha_no_other_obj
+```
 
-This gives the clearest contrast between hallucination and normal behavior.
+### Analyze different step
 
-### For understanding distractor effect:
+```bash
+python vision_feature_comparison.py --step 150
+```
 
-Compare all 3 cases:
-- Hallucination: banana on table (near workspace)
-- Normal plate: banana on plate (far from workspace)
-- Normal clean: no distractors
+### Custom output directory
 
-This helps understand if it's the banana proximity that matters.
+```bash
+python vision_feature_comparison.py --output-dir logs/my_custom_experiment
+```
 
 ---
 

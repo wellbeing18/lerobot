@@ -117,6 +117,32 @@ CONFIG = {
 # HELPER FUNCTIONS
 # ============================================================================
 
+def get_output_dir(tool_name: str, postfix: str = "") -> Path:
+    """Generate timestamped output directory.
+
+    Args:
+        tool_name: Name of the tool (e.g., "vision_features", "kv_cache")
+        postfix: Optional postfix to add (e.g., "halluc_vs_clean")
+
+    Returns:
+        Path like: logs/investigation/vision_features_20260121_143052_halluc_vs_clean
+    """
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if postfix:
+        dir_name = f"{tool_name}_{timestamp}_{postfix}"
+    else:
+        dir_name = f"{tool_name}_{timestamp}"
+
+    return OUTPUT_BASE_DIR / dir_name
+
+
+def get_default_checkpoint() -> str:
+    """Get default checkpoint path as string."""
+    return str(CHECKPOINT_PATH)
+
+
 def get_case_dirs(include_halluc=True, include_normal_plate=False, include_normal_clean=True):
     """Get list of case directories based on selection.
 
