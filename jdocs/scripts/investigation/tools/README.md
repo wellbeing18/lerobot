@@ -13,6 +13,17 @@ python prefix_embedding_analysis.py
 python kv_cache_content_analysis.py
 python denoising_step_analysis.py
 python trajectory_distribution_visualization.py
+
+# Advanced Investigation Methods (Tier 1 - High Impact)
+python attention_knockout.py           # Causal importance of token regions
+python umap_trajectory_analysis.py     # Coverage gap identification
+python distractor_sensitivity_probe.py # Test if distractor causes hallucination
+
+# Advanced Investigation Methods (Tier 2 - High Value)
+python causal_mediation_analysis.py    # Isolate visual vs state effects
+python uncertainty_metrics.py          # Quantify model confidence
+python action_coverage_analysis.py     # Per-joint coverage statistics
+python phase_transition_analysis.py    # Missing transitions in training
 ```
 
 Output directories are auto-generated with timestamps, e.g.:
@@ -142,6 +153,131 @@ python vision_feature_comparison.py --step 150
 
 ```bash
 python vision_feature_comparison.py --output-dir logs/my_custom_experiment
+```
+
+---
+
+---
+
+## Advanced Investigation Methods
+
+### Tier 1: High Impact (Causal Analysis)
+
+#### 6. Attention Knockout
+
+Tests causal importance of attention to specific token regions by zeroing out KV cache.
+
+```bash
+python attention_knockout.py
+```
+
+**Outputs:** `analyses.json`, `knockout_effects_*.png`, `trajectory_*.png`, `knockout_comparison_across_cases.png`, `report.md`
+
+**Key Question:** If we knock out right wrist camera attention, does hallucination disappear?
+
+#### 7. UMAP Trajectory Analysis
+
+Uses UMAP to visualize trajectory manifold and identify coverage gaps.
+
+```bash
+python umap_trajectory_analysis.py
+```
+
+**Outputs:** `analysis.json`, `umap_manifold.png`, `inference_detail.png`, `training_embedding.npy`, `report.md`
+
+**Key Question:** Does hallucination trajectory fall in a coverage gap (void in training distribution)?
+
+#### 8. Distractor Sensitivity Probe
+
+Tests if distractor (banana) causally affects behavior by masking it.
+
+```bash
+python distractor_sensitivity_probe.py
+```
+
+**Outputs:** `analysis.json`, `masking_visualization.png`, `sensitivity_results_*.png`, `report.md`
+
+**Key Question:** If we mask/inpaint the banana, does hallucination disappear?
+
+---
+
+### Tier 2: High Value (Dataset & Mechanism Analysis)
+
+#### 9. Causal Mediation Analysis
+
+Isolates effects of visual input vs state vs language using counterfactuals.
+
+```bash
+python causal_mediation_analysis.py
+```
+
+**Outputs:** `analysis.json`, `causal_mediation_results.png`, `trajectory_comparison.png`, `report.md`
+
+**Key Question:** Is visual input alone sufficient to cause hallucination?
+
+#### 10. Uncertainty Metrics
+
+Quantifies model confidence via multiple inference runs.
+
+```bash
+python uncertainty_metrics.py
+```
+
+**Outputs:** `metrics.json`, `comparison.json`, `uncertainty_comparison.png`, `api_per_joint_*.png`, `report.md`
+
+**Key Question:** Is the model more uncertain during hallucination?
+
+#### 11. Action Coverage Analysis
+
+Analyzes per-joint action distributions in training data.
+
+```bash
+python action_coverage_analysis.py
+```
+
+**Outputs:** `analysis.json`, `coverage_distribution.png`, `inference_vs_training.png`, `report.md`
+
+**Key Question:** Which joints have poor training coverage?
+
+#### 12. Phase Transition Analysis
+
+Identifies missing/rare phase transitions in training data.
+
+```bash
+python phase_transition_analysis.py
+```
+
+**Outputs:** `analysis.json`, `transition_matrix.png`, `phase_distribution.png`, `transition_flow.png`, `report.md`
+
+**Key Question:** Is TRANSPORT → IDLE transition missing (explaining why model continues moving)?
+
+---
+
+## Run All Advanced Experiments
+
+```bash
+cd jdocs/scripts/investigation/tools
+
+# Tier 1: Causal Analysis
+python attention_knockout.py
+python distractor_sensitivity_probe.py
+python causal_mediation_analysis.py
+
+# Tier 2: Dataset & Mechanism
+python umap_trajectory_analysis.py
+python uncertainty_metrics.py
+python action_coverage_analysis.py
+python phase_transition_analysis.py
+```
+
+---
+
+## Tool Dependencies
+
+The advanced tools require additional packages:
+
+```bash
+pip install umap-learn scipy
 ```
 
 ---
