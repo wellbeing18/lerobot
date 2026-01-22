@@ -195,6 +195,18 @@ comments: 1) "Vision Encoder (SigLIP) - FROZEN“ is incorrect, we unfroze visio
  python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
       --task "Use right arm to pick up the tissue package and place it on the plate"
+    
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use RIGHT arm to pick up orange and place it on plate"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up yogurt bottle and place it in the bin"
+
+ python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
+      --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \
+      --task "Use left arm to pick up the tissue package and place it in the bin"
 
  python jdocs/scripts/bimanual/infer_smolvla_bimanual.py \
       --checkpoint outputs/smolvla_bimanual_20260103_200201/checkpoints/040000/pretrained_model \

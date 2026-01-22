@@ -1,0 +1,8 @@
+
+
+diagrams:
+logs/investigation/causal_distribution
+logs/investigation/first_principles
+logs/investigation/advanced_analysis_20260121
+logs/investigation/visual_evidence
+logs/investigation/trajectory_divergence
