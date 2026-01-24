@@ -418,3 +418,41 @@ The velocity field v is learned from training data. The training distribution cr
 | Final τ | MOVEMENT (outside IDLE) | IDLE (inside IDLE region) |
 
 **Root Cause**: Training data created a mapping where `v(K_with_object) = HIGH`, but never taught `v(K_with_irrelevant_object) = LOW`.
+
+---
+
+## Appendix: Visualization Scripts and Output Files
+
+### Scripts for Generating Flow Matching Diagrams
+
+| Script | Output | Description |
+|--------|--------|-------------|
+| `jdocs/scripts/investigation/tools/flow_matching_visualization.py` | `p_trajectory_given_velocity_field.png`, `denoising_steps_visualization.png` | Flow matching mechanism visualizations |
+| `jdocs/scripts/investigation/tools/trajectory_divergence_analysis.py` | `trajectory_divergence_comparison.png` | Trajectory divergence over time |
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `logs/investigation/first_principles/p_trajectory_given_velocity_field.png` | 6-panel flow matching mechanism |
+| `logs/investigation/first_principles/denoising_steps_visualization.png` | 10-step denoising process |
+| `logs/investigation/trajectory_divergence/trajectory_divergence_comparison.png` | Halluc vs Normal trajectory comparison |
+
+### Running the Scripts
+
+```bash
+# Activate conda environment
+eval "$(conda shell.bash hook)" && conda activate lerobot
+
+# Generate flow matching visualizations
+python jdocs/scripts/investigation/tools/flow_matching_visualization.py
+
+# Generate trajectory divergence analysis
+python jdocs/scripts/investigation/tools/trajectory_divergence_analysis.py
+```
+
+### Related Documentation
+
+- `jdocs/investigation_reports/first_principles_explanation.md` - Training distribution bias
+- `jdocs/investigation_reports/mechanism_explanation.md` - Information-action gap
+- `jdocs/investigation_reports/visualization_guide.md` - How to read the diagrams

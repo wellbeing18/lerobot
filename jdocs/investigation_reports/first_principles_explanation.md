@@ -274,3 +274,48 @@ CONCLUSION: This is not a model bug - it's a DATASET DISTRIBUTION BUG.
 | Inference | Applies learned rule to irrelevant objects |
 | Root cause | Dataset distribution bias |
 | Fix | Add training data with P(idle \| irrelevant_object) > 0 |
+
+---
+
+## Appendix: Visualization Scripts and Output Files
+
+### Scripts for Generating Diagrams
+
+| Script | Output | Description |
+|--------|--------|-------------|
+| `jdocs/scripts/investigation/tools/comprehensive_mechanism_visualization.py` | `p_action_given_kv_cache_mechanism.png`, `p_trajectory_given_context_analysis.png`, `complete_hallucination_mechanism.png` | Main mechanism visualizations |
+| `jdocs/scripts/investigation/tools/context_velocity_scatter.py` | `context_velocity_scatter_clean.png` | Clean scatter plot of context vs velocity |
+| `jdocs/scripts/investigation/tools/generate_p_traj_kv.py` | `p_traj_given_kv_cache.png` | P(trajectory \| KV_cache) visualization |
+| `jdocs/scripts/investigation/tools/training_distribution_visualization.py` | `training_distribution_bias.png`, `bias_propagation_flow.png` | Training bias visualizations |
+| `jdocs/scripts/investigation/tools/first_principles_analysis.py` | Analysis output | Training distribution analysis |
+| `jdocs/scripts/investigation/tools/kv_cache_causal_analysis.py` | `information_action_gap.png`, `causal_mechanism_diagram.png` | Information-action gap analysis |
+
+### Output Directories
+
+| Directory | Contents |
+|-----------|----------|
+| `logs/investigation/first_principles/` | First principles analysis visualizations |
+| `logs/investigation/causal_distribution/` | Causal distribution analysis visualizations |
+| `logs/investigation/trajectory_divergence/` | Trajectory comparison visualizations |
+
+### Running the Scripts
+
+```bash
+# Activate conda environment
+eval "$(conda shell.bash hook)" && conda activate lerobot
+
+# Generate context-velocity scatter
+python jdocs/scripts/investigation/tools/context_velocity_scatter.py
+
+# Generate P(traj | KV_cache) visualization
+python jdocs/scripts/investigation/tools/generate_p_traj_kv.py
+
+# Generate comprehensive mechanism visualizations
+python jdocs/scripts/investigation/tools/comprehensive_mechanism_visualization.py
+```
+
+### Related Documentation
+
+- `jdocs/investigation_reports/mechanism_explanation.md` - Information-action gap details
+- `jdocs/investigation_reports/flow_matching_explanation.md` - P(trajectory | v) explanation
+- `jdocs/investigation_reports/visualization_guide.md` - How to read the diagrams
