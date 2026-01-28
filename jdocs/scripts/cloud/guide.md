@@ -943,10 +943,6 @@ If you prefer using a forked LeRobot repo (e.g., with local modifications like g
 ```bash
 # === ON THE CLOUD INSTANCE (after SSH) ===
 
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVk92uDf/ISVMXFQvWV9SrCo5vhH8ZOUyOCPUKClgHV wang.618.bin@gmail.com
-
-ssh -p 13988 root@ssh2.vast.ai -L 8080:localhost:8080
-
 # 1. Clone your forked repo instead of upstream
 git clone https://github.com/wellbeing18/lerobot.git
 cd lerobot
@@ -959,21 +955,26 @@ pip install -e ".[smolvla]"
 # No HF_HOME needed - LeRobot handles caching correctly
 
 # RTX 4090 (24GB)
-BATCH_SIZE=48 MAX_STEPS=30000 \
+GRADIENT_CHECKPOINTING=true BATCH_SIZE=48 MAX_STEPS=60000 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
-# A100 40GB (RECOMMENDED)
-BATCH_SIZE=96 MAX_STEPS=40000 \
+# A100 40GB
+GRADIENT_CHECKPOINTING=false BATCH_SIZE=48 MAX_STEPS=60000 NUM_WORKERS=16 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
 # A100 80GB
-
-BATCH_SIZE=128 MAX_STEPS=35000 \
+GRADIENT_CHECKPOINTING=false BATCH_SIZE=64 MAX_STEPS=50000 NUM_WORKERS=20 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
-# H100 80GB
-BATCH_SIZE=128 MAX_STEPS=30000 \
+# H100 80GB (FASTEST)
+GRADIENT_CHECKPOINTING=false BATCH_SIZE=64 MAX_STEPS=50000 NUM_WORKERS=20 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
+
+# Or use local dataset path (if pre-downloaded)
+DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
+DATASET_NAME=picknplace-bimanual-464 \
+GRADIENT_CHECKPOINTING=false BATCH_SIZE=64 MAX_STEPS=50000 NUM_WORKERS=20 \
+    bash jdocs/scripts/bimanual/train_smolvla_bimanual.sh
 ```
 
 **Why use a fork?**
@@ -1719,15 +1720,55 @@ Checkpoints are saved every `SAVE_STEPS` (default: 5000) to:
 
 ### Download Checkpoints
 
+**For Vast.ai (replace `<PORT>` and `<HOST>` with your instance details):**
+
 ```bash
-# SmolVLA - download from cloud to local
-rsync -avz user@cloud-ip:/home/user/lerobot/outputs/smolvla_bimanual_cloud_*/checkpoints ./checkpoints/
+# === FIND YOUR CHECKPOINT PATH (on cloud instance) ===
+ls -la outputs/
+# Example output: smolvla_bimanual_20260128_231914
 
-# Pi0.5 - download specific checkpoint
-rsync -avz user@cloud-ip:/home/user/lerobot/outputs/pi05_bimanual_*/checkpoint-* ./checkpoints/
+ls -la outputs/smolvla_bimanual_*/checkpoints/
+# Example output: 005000, 010000, 015000, ..., last
 
-# Or use SCP for specific checkpoint
-scp -r user@cloud-ip:/path/to/checkpoint-50000 ./checkpoints/
+# === DOWNLOAD TO LOCAL MACHINE ===
+
+# Option 1: Download latest checkpoint only (recommended, ~2-3GB)
+scp -r -P <PORT> root@<HOST>:/workspace/lerobot/outputs/smolvla_bimanual_*/checkpoints/last ./checkpoints/
+
+# Option 2: Download all checkpoints (~10-15GB)
+scp -r -P <PORT> root@<HOST>:/workspace/lerobot/outputs/smolvla_bimanual_*/checkpoints ./checkpoints/
+
+# Option 3: Download specific checkpoint
+scp -r -P <PORT> root@<HOST>:/workspace/lerobot/outputs/smolvla_bimanual_*/checkpoints/050000 ./checkpoints/
+
+# === EXAMPLE WITH ACTUAL VALUES ===
+# If your Vast.ai SSH is: ssh -p 11761 root@ssh6.vast.ai
+scp -r -P 11761 root@ssh6.vast.ai:/workspace/lerobot/outputs/smolvla_bimanual_*/checkpoints/last ./checkpoints/
+
+# === USING RSYNC (faster for large files, shows progress) ===
+rsync -avz --progress -e "ssh -p <PORT>" \
+    root@<HOST>:/workspace/lerobot/outputs/smolvla_bimanual_*/checkpoints/last \
+    ./checkpoints/
+```
+
+**For other cloud providers (RunPod, Lambda, etc.):**
+
+```bash
+# Standard SCP
+scp -r user@cloud-ip:/home/user/lerobot/outputs/smolvla_bimanual_*/checkpoints/last ./checkpoints/
+
+# Rsync with progress
+rsync -avz --progress user@cloud-ip:/home/user/lerobot/outputs/smolvla_bimanual_*/checkpoints ./checkpoints/
+```
+
+**Pi0.5 and GROOT checkpoints:**
+
+```bash
+# Pi0.5
+scp -r -P <PORT> root@<HOST>:/workspace/lerobot/outputs/pi05_bimanual_*/checkpoints/last ./checkpoints/
+
+# GROOT 1.6
+scp -r -P <PORT> root@<HOST>:/workspace/lerobot/outputs/groot16_bimanual_*/checkpoint-* ./checkpoints/
 ```
 
 ### Resume Training
