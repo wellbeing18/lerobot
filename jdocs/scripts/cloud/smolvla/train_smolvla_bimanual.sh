@@ -151,12 +151,6 @@ echo "============================================================"
 echo ""
 
 # =============================================================================
-# Create Output Directory
-# =============================================================================
-
-mkdir -p "${OUTPUT_DIR}"
-
-# =============================================================================
 # Build Training Command
 # =============================================================================
 
@@ -203,7 +197,11 @@ fi
 # Log Configuration
 # =============================================================================
 
-LOG_FILE="${OUTPUT_DIR}/training.log"
+# Use separate log directory (don't create OUTPUT_DIR - let lerobot handle it)
+LOG_DIR="logs"
+mkdir -p "${LOG_DIR}"
+OUTPUT_NAME=$(basename "${OUTPUT_DIR}")
+LOG_FILE="${LOG_DIR}/train_${OUTPUT_NAME}.log"
 
 # Helper function for logging (matches local script)
 log() {
