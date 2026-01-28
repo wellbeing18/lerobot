@@ -3,30 +3,33 @@
 # Pi0.5 Training Script for Bimanual SO-101
 # ===========================================================================
 #
-# This script trains Pi0.5 with LoRA on the bimanual multitasks dataset.
+# This script trains Pi0.5 on the bimanual multitasks dataset.
+# Supports both LoRA and FULL finetuning modes.
 #
-# Based on: /home/jrobot/project/refs/openpi/LEROBOT_VS_OPENPI_INVESTIGATION.md
+# FINETUNING MODES:
+#   1. LoRA (default for 24-40GB GPUs):
+#      - ~40M trainable params, VRAM: >22.5GB
+#      - Good for RTX 4090, A100 40GB
 #
-# CRITICAL LoRA SETTINGS (from OpenPI investigation):
-#   - lora_alpha MUST equal lora_rank for 1.0 scaling factor
-#   - lora_dropout should be 0.0 (not 0.1)
-#   - These are CRITICAL for training to work correctly!
+#   2. Full Finetuning (recommended for 80GB GPUs):
+#      - ~2.5B trainable params, VRAM: >70GB
+#      - Requires A100 80GB or H100
+#      - Better model quality than LoRA
 #
 # Memory Requirements:
-#   - Full Pi0.5 (2.5B params): ~10-12 GB
-#   - With LoRA (40M trainable): ~5-6 GB
-#   - RTX 4090/5090 (24GB): batch_size=8 recommended
-#   - A100 (40GB): batch_size=32-64 recommended
+#   - LoRA (rank=16): >22.5 GB (RTX 4090, A100 40GB)
+#   - LoRA (rank=32): >30 GB (A100 40GB)
+#   - Full finetuning: >70 GB (A100 80GB, H100)
 #
 # Usage:
-#   # Basic training
+#   # LoRA training (default, for 24-40GB GPUs)
 #   bash train_pi05_bimanual.sh
+#
+#   # Full finetuning (for A100 80GB / H100)
+#   USE_LORA=false BATCH_SIZE=32 bash train_pi05_bimanual.sh
 #
 #   # Custom batch size and steps
 #   BATCH_SIZE=64 MAX_STEPS=100000 bash train_pi05_bimanual.sh
-#
-#   # Local dataset instead of HuggingFace Hub
-#   DATASET_PATH=/path/to/local/dataset bash train_pi05_bimanual.sh
 #
 # ===========================================================================
 

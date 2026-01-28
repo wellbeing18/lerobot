@@ -5,31 +5,37 @@
 #
 # This script finetunes GR00T N1.6-3B on bimanual SO-101 robot data.
 #
-# IMPORTANT: GR00T 1.6 uses SELECTIVE PARAMETER FREEZING, not LoRA.
-# Default configuration:
-#   - tune_llm=False, tune_visual=False: Freeze VLM backbone (~2.8B params)
-#   - tune_projector=True, tune_diffusion_model=True: Train action processing (~214M params)
-# This fits comfortably in 24GB VRAM without LoRA.
+# FINETUNING MODES:
+#   1. Default (Projector + DiT only) - for RTX 4090 (24GB):
+#      - tune_visual=False, tune_llm=False
+#      - tune_projector=True, tune_diffusion_model=True
+#      - ~214M trainable params, VRAM: ~25GB
 #
-# Bimanual Configuration:
-#   - State/Action: 12 DOF (6 per arm: 5 joints + 1 gripper)
-#   - Cameras: 3 (head, left_wrist, right_wrist)
-#   - Task format: "Use [left/right] arm to [action] [object] [target]"
+#   2. Vision + Action (RECOMMENDED for bimanual) - for A100 40GB:
+#      - tune_visual=True, tune_llm=False
+#      - tune_projector=True, tune_diffusion_model=True
+#      - ~300M+ trainable params, VRAM: ~35GB
+#      - Better visual-spatial learning for bimanual coordination
+#
+#   3. Full (all components) - for A100 80GB / H100:
+#      - tune_visual=True, tune_llm=True (with LoRA)
+#      - tune_projector=True, tune_diffusion_model=True
+#      - VRAM: ~40-60GB
 #
 # Memory Requirements:
-#   - RTX 4090/5090 (24GB): batch_size=8 (~20-22GB peak)
-#   - A100 40GB: batch_size=16-32
-#   - If OOM: reduce GLOBAL_BATCH_SIZE to 4
+#   - RTX 4090 (24GB): Default mode only, batch_size=8
+#   - A100 40GB: Vision+Action mode, batch_size=16-32
+#   - A100 80GB / H100: Full mode, batch_size=32-64
 #
 # Usage:
-#   # Basic training
+#   # Default (RTX 4090) - Projector + DiT only
 #   bash train_groot16_bimanual.sh
 #
-#   # MVP run (1000 steps, ~1 hour)
-#   MAX_STEPS=1000 bash train_groot16_bimanual.sh
+#   # Vision + Action (A100 40GB) - RECOMMENDED for bimanual
+#   TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 bash train_groot16_bimanual.sh
 #
-#   # Custom dataset path
-#   DATASET_PATH=/path/to/groot/dataset bash train_groot16_bimanual.sh
+#   # Full finetuning (A100 80GB / H100)
+#   TUNE_VISUAL=true TUNE_LLM=true GLOBAL_BATCH_SIZE=32 bash train_groot16_bimanual.sh
 #
 # ===========================================================================
 
@@ -55,12 +61,13 @@ GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-8}"   # 8 for 24GB VRAM
 WARMUP_RATIO="${WARMUP_RATIO:-0.05}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-5}"
 
-# --- Parameter Freezing (GR00T 1.6 default) ---
-# Uncomment to override:
-# TUNE_LLM="--tune_llm"             # Default: False (frozen)
-# TUNE_VISUAL="--tune_visual"       # Default: False (frozen)
-# TUNE_PROJECTOR="--tune_projector" # Default: True (trainable)
-# TUNE_DIFFUSION="--tune_diffusion_model"  # Default: True (trainable)
+# --- Parameter Freezing Configuration ---
+# Set to "true" to unfreeze, "false" to freeze
+TUNE_VISUAL="${TUNE_VISUAL:-false}"           # Unfreeze vision encoder (recommended for bimanual on A100+)
+TUNE_LLM="${TUNE_LLM:-false}"                 # Unfreeze LLM backbone (requires 80GB+ VRAM)
+TUNE_PROJECTOR="${TUNE_PROJECTOR:-true}"      # Train projector layers (always recommended)
+TUNE_DIFFUSION="${TUNE_DIFFUSION:-true}"      # Train diffusion model (always recommended)
+LORA_RANK="${LORA_RANK:-16}"                  # LoRA rank if using LoRA for LLM
 
 # --- Checkpointing ---
 SAVE_STEPS="${SAVE_STEPS:-1000}"
@@ -95,11 +102,22 @@ echo "Output:         $OUTPUT_DIR"
 echo "Max steps:      $MAX_STEPS"
 echo "Batch size:     $GLOBAL_BATCH_SIZE"
 echo "Learning rate:  $LEARNING_RATE"
-echo "Warmup ratio:   $WARMUP_RATIO"
-echo "Weight decay:   $WEIGHT_DECAY"
-echo "Save steps:     $SAVE_STEPS"
-echo "Num GPUs:       $NUM_GPUS"
-echo "Color jitter:   $COLOR_JITTER"
+echo ""
+echo "Finetuning Mode:"
+echo "  Tune Visual:    $TUNE_VISUAL"
+echo "  Tune LLM:       $TUNE_LLM"
+echo "  Tune Projector: $TUNE_PROJECTOR"
+echo "  Tune Diffusion: $TUNE_DIFFUSION"
+if [ "$TUNE_LLM" = "true" ]; then
+    echo "  LoRA Rank:      $LORA_RANK"
+fi
+echo ""
+echo "Other Settings:"
+echo "  Warmup ratio:   $WARMUP_RATIO"
+echo "  Weight decay:   $WEIGHT_DECAY"
+echo "  Save steps:     $SAVE_STEPS"
+echo "  Num GPUs:       $NUM_GPUS"
+echo "  Color jitter:   $COLOR_JITTER"
 echo "=================================================================="
 
 # Validate dataset exists
@@ -160,6 +178,26 @@ export NUM_GPUS=$NUM_GPUS
 
 echo "Starting training..."
 
+# Build tuning flags based on configuration
+TUNE_FLAGS=""
+if [ "$TUNE_VISUAL" = "true" ]; then
+    TUNE_FLAGS="$TUNE_FLAGS --tune_visual"
+    echo "  >> Unfreezing vision encoder (tune_visual=true)"
+fi
+if [ "$TUNE_LLM" = "true" ]; then
+    TUNE_FLAGS="$TUNE_FLAGS --tune_llm --lora_rank $LORA_RANK"
+    echo "  >> Unfreezing LLM with LoRA rank=$LORA_RANK (tune_llm=true)"
+fi
+if [ "$TUNE_PROJECTOR" = "true" ]; then
+    TUNE_FLAGS="$TUNE_FLAGS --tune_projector"
+fi
+if [ "$TUNE_DIFFUSION" = "true" ]; then
+    TUNE_FLAGS="$TUNE_FLAGS --tune_diffusion_model"
+fi
+
+echo "  Tuning flags: $TUNE_FLAGS"
+echo ""
+
 # Launch training
 # For single GPU: use plain python
 # For multi-GPU: use torchrun --nproc_per_node=$NUM_GPUS --master_port=29500
@@ -178,6 +216,7 @@ CUDA_VISIBLE_DEVICES=0 python \
     --weight_decay $WEIGHT_DECAY \
     --learning_rate $LEARNING_RATE \
     $WANDB_FLAG \
+    $TUNE_FLAGS \
     --global_batch_size $GLOBAL_BATCH_SIZE \
     --color_jitter_params $COLOR_JITTER \
     --dataloader_num_workers $DATALOADER_WORKERS \

@@ -183,6 +183,101 @@ def get_dataset_size(dataset_path: Path) -> dict:
     return sizes
 
 
+def generate_readme(dataset_path: Path, info: dict, license: str = "apache-2.0", tags: list = None) -> str:
+    """
+    Generate a README.md file for HuggingFace datasets.
+
+    This is CRITICAL for HuggingFace to properly recognize the dataset.
+    Without the 'configs' section pointing to data/*/*.parquet, HuggingFace
+    will auto-detect the wrong parquet files (e.g., meta/tasks.parquet).
+
+    Args:
+        dataset_path: Path to the dataset
+        info: Dataset info from info.json
+        license: License string
+        tags: Optional list of tags
+
+    Returns:
+        str: README content
+    """
+    # Build tags list
+    all_tags = ["LeRobot", "robotics"]
+    if tags:
+        all_tags.extend(tags)
+    tags_yaml = "\n".join(f"  - {tag}" for tag in all_tags)
+
+    # Get feature summary
+    features = info.get("features", {})
+    feature_lines = []
+    for name, feat in features.items():
+        dtype = feat.get("dtype", "unknown")
+        shape = feat.get("shape", [])
+        if dtype == "video":
+            video_info = feat.get("info", {})
+            h, w = video_info.get("video.height", "?"), video_info.get("video.width", "?")
+            codec = video_info.get("video.codec", "?")
+            feature_lines.append(f"- `{name}`: video ({h}x{w}, {codec})")
+        else:
+            feature_lines.append(f"- `{name}`: {dtype} {shape}")
+    features_md = "\n".join(feature_lines)
+
+    # Get tasks from tasks.jsonl
+    tasks_md = ""
+    tasks_path = dataset_path / "meta" / "tasks.jsonl"
+    if tasks_path.exists():
+        tasks = []
+        with open(tasks_path) as f:
+            for line in f:
+                if line.strip():
+                    task = json.loads(line)
+                    tasks.append(f"- {task.get('task', task.get('task_index', 'unknown'))}")
+        if tasks:
+            tasks_md = "\n## Tasks\n\n" + "\n".join(tasks[:20])  # Limit to 20 tasks
+            if len(tasks) > 20:
+                tasks_md += f"\n- ... and {len(tasks) - 20} more"
+
+    readme = f"""---
+license: {license}
+task_categories:
+  - robotics
+tags:
+{tags_yaml}
+configs:
+  - config_name: default
+    data_files: data/*/*.parquet
+---
+
+# {dataset_path.name}
+
+LeRobot dataset for robot manipulation.
+
+## Dataset Info
+
+| Property | Value |
+|----------|-------|
+| Codebase Version | {info.get('codebase_version', 'N/A')} |
+| Robot Type | {info.get('robot_type', 'N/A')} |
+| Total Episodes | {info.get('total_episodes', 'N/A')} |
+| Total Frames | {info.get('total_frames', 'N/A')} |
+| Total Tasks | {info.get('total_tasks', 'N/A')} |
+| FPS | {info.get('fps', 'N/A')} |
+
+## Features
+
+{features_md}
+{tasks_md}
+
+## Usage
+
+```python
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset("REPO_ID")
+```
+"""
+    return readme
+
+
 def upload_dataset(
     local_path: Path,
     repo_id: str,
@@ -206,8 +301,6 @@ def upload_dataset(
         tags: Optional list of tags for the dataset
         dry_run: If True, validate only without uploading
     """
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
     print("=" * 60)
     print("LeRobot Dataset Upload to HuggingFace Hub")
     print("=" * 60)
@@ -248,24 +341,33 @@ def upload_dataset(
         upload_size = sizes['data_mb'] + sizes['meta_mb']
         print(f"\n  Upload size (no videos): {upload_size:.1f} MB")
 
-    # Step 3: Load dataset
+    # Step 3: Generate README.md
     print("\n" + "-" * 40)
-    print("Step 3: Loading dataset...")
+    print("Step 3: Generating README.md...")
     print("-" * 40)
 
-    # Extract dataset name from path for local loading
-    dataset_name = local_path.name
+    readme_content = generate_readme(local_path, info, license, tags)
+    readme_path = local_path / "README.md"
 
-    dataset = LeRobotDataset(
-        repo_id=repo_id,  # Use target repo_id
-        root=str(local_path.parent),  # Parent directory
-        local_files_only=True,
-    )
+    # Check if README already exists
+    readme_existed = readme_path.exists()
+    if readme_existed:
+        print(f"\n  README.md already exists, will be updated")
+    else:
+        print(f"\n  Creating README.md for HuggingFace compatibility")
 
-    print(f"\n  Loaded {len(dataset)} frames")
-    print(f"  Features: {list(dataset.meta.features.keys())}")
+    # Write README
+    with open(readme_path, "w") as f:
+        f.write(readme_content)
+    print(f"  README.md written to: {readme_path}")
+
+    print(f"\n  Features: {list(info.get('features', {}).keys())}")
 
     if dry_run:
+        # Clean up generated README if it didn't exist before
+        if not readme_existed:
+            readme_path.unlink()
+            print(f"\n  (Removed generated README.md for dry run)")
         print("\n" + "=" * 60)
         print("DRY RUN COMPLETE - No upload performed")
         print("=" * 60)
@@ -278,9 +380,10 @@ def upload_dataset(
     print("Step 4: Uploading to HuggingFace Hub...")
     print("-" * 40)
 
+    from huggingface_hub import HfApi
+
     # Check HuggingFace authentication
     try:
-        from huggingface_hub import HfApi
         api = HfApi()
         user_info = api.whoami()
         print(f"\n  Authenticated as: {user_info['name']}")
@@ -289,25 +392,39 @@ def upload_dataset(
         print("  Please run: huggingface-cli login")
         sys.exit(1)
 
-    # Prepare tags
-    upload_tags = tags or []
-    if "LeRobot" not in upload_tags:
-        upload_tags.append("LeRobot")
+    # Create repository
+    print(f"\n  Creating repository: {repo_id}")
+    api.create_repo(
+        repo_id=repo_id,
+        private=private,
+        repo_type="dataset",
+        exist_ok=True,
+    )
 
-    print(f"\n  Creating/updating repository: {repo_id}")
-    print(f"  This may take a while for large datasets...")
+    # Prepare ignore patterns
+    ignore_patterns = ["images/", "*.pyc", "__pycache__", ".git"]
+    if not push_videos:
+        ignore_patterns.append("videos/")
+
+    print(f"  Uploading files (this may take a while for large datasets)...")
 
     # Determine if we need upload_large_folder based on size
     use_large_folder = sizes['total_mb'] > 5000  # > 5GB
 
-    dataset.push_to_hub(
-        branch=branch,
-        tags=upload_tags,
-        license=license,
-        push_videos=push_videos,
-        private=private,
-        upload_large_folder=use_large_folder,
-    )
+    if use_large_folder:
+        api.upload_large_folder(
+            folder_path=str(local_path),
+            repo_id=repo_id,
+            repo_type="dataset",
+            ignore_patterns=ignore_patterns,
+        )
+    else:
+        api.upload_folder(
+            folder_path=str(local_path),
+            repo_id=repo_id,
+            repo_type="dataset",
+            ignore_patterns=ignore_patterns,
+        )
 
     # Step 5: Success
     print("\n" + "=" * 60)

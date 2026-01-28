@@ -1,5 +1,5 @@
 hardware_id: xlerobot_bimanual_v1
-last_scan: '2026-01-20T00:00:00.000000'
+last_scan: '2026-01-25T00:00:00.000000'
 robot:
   type: bi_so101_follower
   id: xlerobot_bimanual
@@ -21,13 +21,13 @@ teleop:
   type: bi_so101_leader
   id: xlerobot_bimanual_leader
   left_arm:
-    port: /dev/ttyACM0
+    port: /dev/ttyACM3
     id: xlerobot_left_leader
     use_degrees: true
     usb_serial: null
     usb_path: null
   right_arm:
-    port: /dev/ttyACM1
+    port: /dev/ttyACM2
     id: xlerobot_right_leader
     use_degrees: true
     usb_serial: null
@@ -35,7 +35,7 @@ teleop:
 cameras:
   head:
     type: opencv
-    index_or_path: /dev/v4l/by-path/pci-0000:80:14.0-usb-0:4.1.1:1.0-video-index0
+    index_or_path: 4
     width: 640
     height: 480
     fps: 30
@@ -47,7 +47,7 @@ cameras:
     usb_path: null
   left_wrist:
     type: opencv
-    index_or_path: /dev/v4l/by-path/pci-0000:80:14.0-usb-0:10.1:1.0-video-index0
+    index_or_path: 6
     width: 640
     height: 480
     fps: 30
@@ -56,7 +56,7 @@ cameras:
     usb_path: null
   right_wrist:
     type: opencv
-    index_or_path: /dev/v4l/by-path/pci-0000:80:14.0-usb-0:10.3:1.0-video-index0
+    index_or_path: 8
     width: 640
     height: 480
     fps: 30

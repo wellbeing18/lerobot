@@ -129,8 +129,10 @@ def verify_dataset_loading(dataset_path: Path, result: TrainingVerificationResul
 
         print(f"  Loading dataset: {dataset_path}")
         print(f"  Video backend: pyav")
+        # Use dataset folder name as repo_id for local loading
+        repo_id = dataset_path.name
         dataset = LeRobotDataset(
-            repo_id="multitasks",
+            repo_id=repo_id,
             root=str(dataset_path),
             video_backend="pyav",
         )

@@ -463,9 +463,9 @@ TASK_PRESETS = {
     },
     "left_arm_pick_and_place": {
         "template": "Use left arm to pick up the {object} and place it in the {target}",
-        "episode_time_s": 60,
+        "episode_time_s": 120,
         "reset_time_s": 15,
-        "recommended_episodes": 20,
+        "recommended_episodes": 1,
         "default_object": "used tissue",
         "default_target": "bin",
         "description": "BIMANUAL: Left arm only pick-and-place (right arm stays idle)",
@@ -481,9 +481,9 @@ TASK_PRESETS = {
     },
     "right_arm_pick_and_place": {
         "template": "Use right arm to pick up the {object} and place it in the {target}",
-        "episode_time_s": 60,
+        "episode_time_s": 120,
         "reset_time_s": 15,
-        "recommended_episodes": 20,
+        "recommended_episodes": 1,
         "default_object": "used tissue",
         "default_target": "bin",
         "description": "BIMANUAL: Right arm only pick-and-place (left arm stays idle)",
@@ -1296,6 +1296,14 @@ Examples:
 
     # Build task string
     task_string = build_task_string(task_type, **kwargs)
+
+    # Prompt for custom task string
+    print_section("Task String")
+    print(f"Generated: \"{task_string}\"")
+    custom_task = input("Enter custom task string (or press Enter to use generated): ").strip()
+    if custom_task:
+        task_string = custom_task
+        print(f"Using custom: \"{task_string}\"")
 
     # Get episode count (CLI > config > preset default)
     preset = TASK_PRESETS[task_type]
