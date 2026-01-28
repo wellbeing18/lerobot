@@ -61,7 +61,7 @@ This guide covers setting up cloud GPU instances for training SmolVLA, Pi0.5, an
       - [Memory \& Batch Size Configuration](#memory--batch-size-configuration)
       - [Training Time \& Cost (30,000 steps recommended)](#training-time--cost-30000-steps-recommended)
       - [SmolVLA Commands for Vast.ai](#smolvla-commands-for-vastai)
-      - [Alternative: Upload Training Script](#alternative-upload-training-script)
+      - [Alternative: Use Fork with Training Script](#alternative-use-fork-with-training-script)
     - [Pi0.5 on Vast.ai](#pi05-on-vastai)
       - [Memory \& Batch Size Configuration](#memory--batch-size-configuration-1)
       - [Training Time \& Cost (120,000 steps)](#training-time--cost-120000-steps)
@@ -868,28 +868,11 @@ pip install -e ".[smolvla]"
 nvidia-smi
 python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}, CUDA: {torch.version.cuda}')"
 
-# === STEP 2: DOWNLOAD DATASET (do this BEFORE training to save GPU time) ===
+# === STEP 2: START TRAINING ===
 
-# Pre-download the HuggingFace dataset (~3.5GB, takes 1-3 min)
-# This avoids downloading during training which wastes billable GPU time
-python -c "
-from huggingface_hub import snapshot_download
-print('Downloading dataset jasmine314342/picknplace-bimanual-464...')
-path = snapshot_download(
-    repo_id='jasmine314342/picknplace-bimanual-464',
-    repo_type='dataset',
-)
-print(f'Download complete! Dataset cached at: {path}')
-"
-
-# Note the cache location - on Vast.ai PyTorch template it's typically:
-#   /workspace/.hf_home/hub/datasets--jasmine314342--picknplace-bimanual-464/
-# You'll need to set HF_HOME=/workspace/.hf_home when running training
-
-# === STEP 3: START TRAINING ===
-
-# IMPORTANT: Set HF_HOME to point to Vast.ai's HuggingFace cache location
-export HF_HOME=/workspace/.hf_home
+# OPTION A: Let LeRobot download automatically (SIMPLEST - RECOMMENDED)
+# No pre-download needed - LeRobot will download and cache the dataset automatically.
+# This is the simplest approach and works correctly on any cloud instance.
 
 # Choose ONE command based on your GPU.
 # Key settings for Vision+Expert mode (recommended for bimanual):
@@ -897,7 +880,7 @@ export HF_HOME=/workspace/.hf_home
 #   --policy.train_expert_only=true       (keep language model frozen)
 
 # --- A100 40GB (RECOMMENDED): batch=96, 30K steps (~24 epochs), ~3-4 hrs, ~$2-3 ---
-HF_HOME=/workspace/.hf_home python -m lerobot.scripts.lerobot_train \
+python -m lerobot.scripts.lerobot_train \
     --dataset.repo_id=jasmine314342/picknplace-bimanual-464 \
     --dataset.video_backend=pyav \
     --policy.path=lerobot/smolvla_base \
@@ -939,7 +922,7 @@ HF_HOME=/workspace/.hf_home python -m lerobot.scripts.lerobot_train \
 # Same command as above, but change:
 #   --batch_size=128
 
-# === STEP 4: MONITOR TRAINING ===
+# === STEP 3: MONITOR TRAINING ===
 
 # In another terminal (or use tmux/screen):
 watch -n 1 nvidia-smi              # GPU utilization
@@ -953,56 +936,54 @@ tail -f outputs/smolvla_bimanual/training.log  # Training progress
 - `left_wrist` → `camera2`
 - `right_wrist` → `camera3`
 
-#### Alternative: Upload Training Script
+#### Alternative: Use Fork with Training Script
 
-If you prefer using the pre-configured training script instead of the inline command:
+If you prefer using a forked LeRobot repo (e.g., with local modifications like gradient checkpointing):
 
 ```bash
-# === ON YOUR LOCAL MACHINE ===
-
-# 1. Create directory and upload the training script
-# Replace <PORT> and <HOST> with your Vast.ai SSH details (from "Connect" button)
-# Example: ssh -p 11761 root@ssh6.vast.ai → PORT=11761, HOST=ssh6.vast.ai
-
-ssh -p <PORT> root@<HOST> "mkdir -p ~/lerobot/jdocs/scripts/cloud/smolvla"
-scp -P <PORT> jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh root@<HOST>:~/lerobot/jdocs/scripts/cloud/smolvla/
-
-# Example with actual values:
-# ssh -p 11761 root@ssh6.vast.ai "mkdir -p ~/lerobot/jdocs/scripts/cloud/smolvla"
-# scp -P 11761 ~/Downloads/train_smolvla_bimanual.sh root@ssh6.vast.ai:/workspace/lerobot/jdocs/scripts/cloud/smolvla/
-
 # === ON THE CLOUD INSTANCE (after SSH) ===
 
-# 2. Make script executable
-cd ~/lerobot
-chmod +x jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVk92uDf/ISVMXFQvWV9SrCo5vhH8ZOUyOCPUKClgHV wang.618.bin@gmail.com
 
-# 3. Run training
-# IMPORTANT: Set HF_HOME so the script finds the cached dataset
+ssh -p 13988 root@ssh2.vast.ai -L 8080:localhost:8080
+
+# 1. Clone your forked repo instead of upstream
+git clone https://github.com/wellbeing18/lerobot.git
+cd lerobot
+
+# 2. Fix PyTorch version conflict
+pip uninstall -y torch torchvision torchaudio
+pip install -e ".[smolvla]"
+
+# 3. Run training (LeRobot downloads dataset automatically)
+# No HF_HOME needed - LeRobot handles caching correctly
 
 # RTX 4090 (24GB)
-HF_HOME=/workspace/.hf_home BATCH_SIZE=48 MAX_STEPS=30000 \
+BATCH_SIZE=48 MAX_STEPS=30000 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
 # A100 40GB (RECOMMENDED)
-HF_HOME=/workspace/.hf_home BATCH_SIZE=96 MAX_STEPS=30000 \
+BATCH_SIZE=96 MAX_STEPS=40000 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
 # A100 80GB
-HF_HOME=/workspace/.hf_home BATCH_SIZE=128 MAX_STEPS=35000 \
+
+BATCH_SIZE=128 MAX_STEPS=35000 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
 # H100 80GB
-HF_HOME=/workspace/.hf_home BATCH_SIZE=128 MAX_STEPS=30000 \
+BATCH_SIZE=128 MAX_STEPS=30000 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 ```
 
-**Why `HF_HOME=/workspace/.hf_home`?**
-- Vast.ai PyTorch template caches HuggingFace datasets at `/workspace/.hf_home/hub/`
-- Default is `~/.cache/huggingface/` which is different
-- Setting `HF_HOME` tells LeRobot where to find the pre-downloaded dataset
+**Why use a fork?**
+- Your fork may have local modifications not in upstream (e.g., gradient checkpointing for SmolVLA)
+- Training scripts in `jdocs/scripts/cloud/` are already included
+- No need to upload scripts separately
 
-**Tip:** You can also upload the entire `jdocs/scripts/cloud/` folder:
+**Important:** Do NOT set `HF_HOME` - LeRobot uses its own cache location (`HF_LEROBOT_HOME`), which is different from the HuggingFace Hub cache. Just let LeRobot download automatically.
+
+**Tip:** You can also upload scripts to upstream lerobot:
 ```bash
 scp -P <PORT> -r jdocs/scripts/cloud/ root@<HOST>:~/lerobot/jdocs/scripts/
 ```

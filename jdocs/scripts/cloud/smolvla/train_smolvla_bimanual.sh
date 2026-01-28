@@ -15,10 +15,15 @@
 #   - Gradient checkpointing for memory efficiency
 #   - ~185M trainable params (~41% of 450M total)
 #
-# Memory Requirements:
+# Memory Requirements (with gradient_checkpointing=true):
+#   - RTX 4090 (24GB): batch_size=32-48
+#   - A100 40GB: batch_size=64-96
+#   - A100 80GB / H100: batch_size=128-200
+#
+# Memory Requirements (with gradient_checkpointing=false, upstream LeRobot):
 #   - RTX 4090 (24GB): batch_size=8-16
-#   - A100 40GB: batch_size=32-64
-#   - A100 80GB / H100: batch_size=64-128
+#   - A100 40GB: batch_size=32-48
+#   - A100 80GB / H100: batch_size=64-96
 #
 # Usage:
 #   # Basic training with HuggingFace dataset
@@ -58,15 +63,16 @@ PRETRAINED_MODEL="${PRETRAINED_MODEL:-lerobot/smolvla_base}"
 FREEZE_VISION="${FREEZE_VISION:-false}"          # Unfreeze for bimanual
 TRAIN_EXPERT_ONLY="${TRAIN_EXPERT_ONLY:-true}"   # Keep language frozen
 TRAIN_STATE_PROJ="${TRAIN_STATE_PROJ:-true}"
-# NOTE: gradient_checkpointing is NOT supported in upstream LeRobot SmolVLA
-# It was a local modification. Removed for cloud compatibility.
+# NOTE: gradient_checkpointing requires forked LeRobot (not upstream)
+# Set to false if using upstream LeRobot
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
 
 # --- Training Hyperparameters ---
 # For 464 episodes (118K frames): epochs = (steps × batch) / 118772
 # Measured: batch=48 uses ~20GB on 24GB GPU (Vision+Expert mode)
 # Official SmolVLA: 20K steps for 50 episodes = ~107 epochs
 # For 464 eps (9.3x larger): ~30K steps recommended (~24 epochs with batch=96)
-BATCH_SIZE="${BATCH_SIZE:-96}"                   # RTX 4090: 48, A100 40GB: 96, A100 80GB: 128
+BATCH_SIZE="${BATCH_SIZE:-96}"                   # With grad_ckpt: RTX4090=48, A100-40=96, A100-80=128
 MAX_STEPS="${MAX_STEPS:-30000}"                  # 30K for 464 eps (~24 epochs with batch=96)
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-10}"
@@ -166,6 +172,7 @@ CMD="python -W ignore::UserWarning -W ignore::FutureWarning -W ignore::Deprecati
     --policy.freeze_vision_encoder=${FREEZE_VISION} \
     --policy.train_expert_only=${TRAIN_EXPERT_ONLY} \
     --policy.train_state_proj=${TRAIN_STATE_PROJ} \
+    --policy.gradient_checkpointing=${GRADIENT_CHECKPOINTING} \
     --policy.optimizer_lr=${LEARNING_RATE} \
     --policy.optimizer_weight_decay=${WEIGHT_DECAY} \
     --policy.optimizer_grad_clip_norm=${GRAD_CLIP_NORM} \
@@ -227,6 +234,7 @@ log() {
     echo "  Warmup steps:         ${WARMUP_STEPS}"
     echo "  Freeze vision:        ${FREEZE_VISION}"
     echo "  Expert only:          ${TRAIN_EXPERT_ONLY}"
+    echo "  Grad checkpoint:      ${GRADIENT_CHECKPOINTING}"
     echo "  Chunk size:           ${CHUNK_SIZE}"
     echo "  N action steps:       ${N_ACTION_STEPS}"
     echo "  Num denoising steps:  ${NUM_STEPS}"
