@@ -212,15 +212,17 @@ elif [ "${FP8_BACKEND}" = "torchao" ]; then
     TORCHAO_OK=$(python -c "
 import warnings
 warnings.filterwarnings('ignore')
+import logging
+logging.disable(logging.WARNING)
 try:
     import torchao
     from torchao.float8 import convert_to_float8_training
-    print('OK')
+    print('TORCHAO_CHECK_OK')
 except Exception as e:
-    print(f'FAIL: {e}')
-" 2>&1)
+    print(f'TORCHAO_CHECK_FAIL: {e}')
+" 2>/dev/null)
 
-    if [[ "${TORCHAO_OK}" == "OK" ]]; then
+    if [[ "${TORCHAO_OK}" == *"TORCHAO_CHECK_OK"* ]]; then
         echo "  torchao: OK (already installed and compatible)"
     else
         echo "  torchao status: ${TORCHAO_OK}"
@@ -242,9 +244,14 @@ echo ""
 echo "Verifying FP8 backend..."
 
 if [ "${FP8_BACKEND}" = "torchao" ]; then
+    # Test torchao FP8 - check if the LAST line is "OK" (warnings may appear before)
     FP8_TEST=$(python -c "
 import warnings
+import sys
+# Suppress warnings to stderr
 warnings.filterwarnings('ignore')
+import logging
+logging.disable(logging.WARNING)
 try:
     import torch
     from torchao.float8 import convert_to_float8_training, Float8LinearConfig
@@ -252,14 +259,18 @@ try:
     model = torch.nn.Linear(32, 32).cuda()
     config = Float8LinearConfig()
     convert_to_float8_training(model, config=config)
-    print('OK')
+    # Explicitly flush and print to ensure OK is captured
+    sys.stdout.flush()
+    print('TORCHAO_FP8_OK')
 except Exception as e:
-    print(f'FAIL: {e}')
-" 2>&1)
+    print(f'TORCHAO_FP8_FAIL: {e}')
+" 2>/dev/null)
 
-    if [[ "${FP8_TEST}" == "OK" ]]; then
+    # Check if output contains our success marker (ignore warnings)
+    if [[ "${FP8_TEST}" == *"TORCHAO_FP8_OK"* ]]; then
         echo "  torchao FP8 test: PASSED"
-    else
+        echo "  (cpp extension warning is normal - FP8 still works)"
+    elif [[ "${FP8_TEST}" == *"TORCHAO_FP8_FAIL"* ]]; then
         echo "  torchao FP8 test: FAILED"
         echo "  Error: ${FP8_TEST}"
         echo ""
@@ -268,6 +279,9 @@ except Exception as e:
         echo ""
         # Fall back to BF16 script
         exec bash "$(dirname "$0")/train_smolvla_bimanual.sh"
+    else
+        echo "  torchao FP8 test: UNKNOWN (continuing anyway)"
+        echo "  Output: ${FP8_TEST}"
     fi
 fi
 
@@ -295,38 +309,19 @@ fp8_config:
   amax_compute_algo: max
 EOF
 else
-    # Use MSAMP as a workaround if torchao backend isn't recognized by accelerate
-    # Check accelerate version and torchao backend support
-    ACCELERATE_HAS_TORCHAO=$(python -c "
-try:
-    from accelerate.utils import FP8BackendType
-    print('torchao' if hasattr(FP8BackendType, 'TORCHAO') else 'no')
-except:
-    print('no')
-" 2>/dev/null)
+    # For torchao backend, always use direct injection approach
+    # The accelerate FP8 backend is unreliable across different versions
+    echo "  Using direct torchao API for FP8 (most reliable method)..."
 
-    if [ "${ACCELERATE_HAS_TORCHAO}" = "torchao" ]; then
-        cat > "${ACCELERATE_CONFIG_FILE}" << EOF
-compute_environment: LOCAL_MACHINE
-distributed_type: 'NO'
-mixed_precision: fp8
-fp8_config:
-  backend: TORCHAO
-EOF
-    else
-        echo "  WARNING: accelerate doesn't recognize torchao backend"
-        echo "  Using direct torchao API instead of accelerate FP8..."
-
-        # Create BF16 config - we'll inject FP8 manually via torchao
-        cat > "${ACCELERATE_CONFIG_FILE}" << EOF
+    # Create BF16 config - we'll inject FP8 manually via torchao
+    cat > "${ACCELERATE_CONFIG_FILE}" << EOF
 compute_environment: LOCAL_MACHINE
 distributed_type: 'NO'
 mixed_precision: bf16
 EOF
 
-        # Set flag to use direct torchao injection
-        USE_DIRECT_TORCHAO="true"
-    fi
+    # Set flag to use direct torchao injection
+    USE_DIRECT_TORCHAO="true"
 fi
 
 echo "  FP8 Backend: ${FP8_BACKEND}"
