@@ -398,6 +398,9 @@ else
 fi
 
 # Build command based on FP8 method
+# Suppress torchvision deprecation warnings in worker processes
+export PYTHONWARNINGS="ignore::UserWarning:torchvision"
+
 if [ "${USE_DIRECT_TORCHAO}" = "true" ]; then
     echo ""
     echo "Using direct torchao FP8 injection (accelerate backend not available)..."
@@ -405,7 +408,7 @@ if [ "${USE_DIRECT_TORCHAO}" = "true" ]; then
 
     # Use the FP8 wrapper script which injects FP8 directly via torchao API
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    CMD="python ${SCRIPT_DIR}/fp8_train_wrapper.py ${TRAIN_ARGS}"
+    CMD="python -W ignore::UserWarning ${SCRIPT_DIR}/fp8_train_wrapper.py ${TRAIN_ARGS}"
 else
     # Use accelerate launch with FP8 config
     CMD="accelerate launch --config_file ${ACCELERATE_CONFIG_FILE} \

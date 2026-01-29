@@ -14,9 +14,12 @@ import os
 import logging
 import warnings
 
-# Suppress torchao warnings about cpp extensions
-warnings.filterwarnings('ignore', message='.*cpp extensions.*')
+# Suppress warnings (including in DataLoader worker processes)
+os.environ.setdefault('PYTHONWARNINGS', 'ignore::UserWarning')
 os.environ.setdefault('TORCHAO_DISABLE_CPP_EXTENSION_WARNING', '1')
+warnings.filterwarnings('ignore', message='.*cpp extensions.*')  # torchao cpp extension warning
+warnings.filterwarnings('ignore', message='.*video decoding.*deprecated.*')  # torchvision video deprecation
+warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')  # torchvision warnings
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
