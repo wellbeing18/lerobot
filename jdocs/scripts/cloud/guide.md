@@ -115,6 +115,16 @@ This guide covers setting up cloud GPU instances for training SmolVLA, Pi0.5, an
     - [Slow Training](#slow-training)
     - [Connection Issues](#connection-issues)
     - [Training Diverges](#training-diverges)
+  - [GPU Acceleration Methods for VLA Training](#gpu-acceleration-methods-for-vla-training)
+    - [Mixed Precision Training](#mixed-precision-training)
+    - [FP8 Training (H100 Only)](#fp8-training-h100-only)
+    - [DataLoader Optimization](#dataloader-optimization)
+    - [Memory Optimization](#memory-optimization)
+    - [torch.compile (A100/H100)](#torchcompile-a100h100)
+    - [TensorFloat32 (TF32)](#tensorfloat32-tf32)
+    - [Multi-GPU Training](#multi-gpu-training)
+    - [H100 vs A100 Performance Comparison](#h100-vs-a100-performance-comparison)
+    - [Quick Optimization Checklist](#quick-optimization-checklist)
   - [Cost Optimization Tips](#cost-optimization-tips)
   - [Quick Reference](#quick-reference)
     - [SmolVLA Key Parameters](#smolvla-key-parameters)
@@ -1938,6 +1948,198 @@ LEARNING_RATE=5e-5 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 # Increase warmup steps
 WARMUP_STEPS=2000 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 ```
+
+---
+
+## GPU Acceleration Methods for VLA Training
+
+This section covers advanced optimization techniques to maximize training speed on A100/H100 GPUs.
+
+### Mixed Precision Training
+
+| GPU | Recommended Precision | Speedup vs FP32 | Notes |
+|-----|----------------------|-----------------|-------|
+| **A100** | BF16 | 2-2.5x | Native support, stable |
+| **H100** | BF16 or FP8 | 3-6x | FP8 requires TransformerEngine |
+| **RTX 4090** | BF16 | 1.5-2x | Good for smaller batches |
+
+**BF16 is enabled by default** in most VLA training scripts. To verify:
+
+```bash
+# Check if bf16 is being used (look for "bfloat16" in logs)
+grep -i "bf16\|bfloat" training.log
+```
+
+### FP8 Training (H100 Only)
+
+FP8 provides up to **2x speedup over BF16** on H100 GPUs with ~30% memory reduction.
+
+#### FP8 Support Status
+
+| Model | FP8 Support | How to Enable |
+|-------|-------------|---------------|
+| **GROOT 1.6** | Not native yet | Requires code modification |
+| **SmolVLA** | Via Accelerate | `accelerate launch --mixed_precision fp8` |
+| **Pi0.5** | Via torchao | `torch.compile` + FP8 recipe |
+
+#### Enabling FP8 with Accelerate
+
+```bash
+# Install TransformerEngine
+pip install transformer-engine[pytorch]
+
+# Method 1: Accelerate config (interactive)
+accelerate config
+# Select: fp8 for mixed precision
+# Select: TE (TransformerEngine) as backend
+
+# Method 2: Command line
+accelerate launch --mixed_precision fp8 your_training_script.py
+
+# Method 3: Config YAML (~/.cache/huggingface/accelerate/default_config.yaml)
+```
+
+Example accelerate config for FP8:
+
+```yaml
+compute_environment: LOCAL_MACHINE
+distributed_type: 'NO'
+mixed_precision: fp8
+fp8_config:
+  backend: TE
+  fp8_format: HYBRID
+  amax_history_len: 1024
+  amax_compute_algo: max
+```
+
+#### TorchAO FP8 (Alternative)
+
+```bash
+pip install torchao
+```
+
+```python
+from torchao.float8 import convert_to_float8_training
+
+model = convert_to_float8_training(model)
+model = torch.compile(model)  # Required for speedup!
+```
+
+### DataLoader Optimization
+
+Data loading is often the bottleneck when GPU utilization fluctuates. Key settings:
+
+```python
+DataLoader(
+    dataset,
+    batch_size=24,
+    num_workers=8,              # Set to CPU cores (os.cpu_count())
+    pin_memory=True,            # Faster host→GPU transfer
+    prefetch_factor=4,          # Queue 4 batches per worker
+    persistent_workers=True,    # Avoid worker restart between epochs
+)
+```
+
+**Environment variables for training scripts:**
+
+```bash
+NUM_WORKERS=8 \
+PIN_MEMORY=true \
+PREFETCH_FACTOR=4 \
+    bash train_script.sh
+```
+
+**Diagnose data loading bottleneck:**
+- If GPU utilization fluctuates (39% → 100% → 39%), it's likely data loading
+- Look for "Wait for shard" or "Caching shard" messages in logs
+
+### Memory Optimization
+
+#### Gradient Checkpointing
+
+Trades compute for memory - allows larger batch sizes:
+
+```bash
+GRADIENT_CHECKPOINTING=true \
+    bash train_script.sh
+```
+
+#### Pre-cache Dataset to RAM
+
+For faster data loading, copy dataset to RAM disk:
+
+```bash
+# Copy to RAM disk (if you have enough RAM)
+cp -r /workspace/dataset /dev/shm/dataset
+DATASET_PATH=/dev/shm/dataset bash train_script.sh
+```
+
+### torch.compile (A100/H100)
+
+Can provide 10-30% speedup, but has compatibility issues with Flash Attention:
+
+```python
+model = torch.compile(model)
+```
+
+**Note:** Flash Attention 2 does not work with torch.compile. Choose one or the other.
+
+### TensorFloat32 (TF32)
+
+Enable TF32 for faster matrix operations on A100/H100:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+# Or environment variable:
+# NVIDIA_TF32_OVERRIDE=1
+```
+
+### Multi-GPU Training
+
+For large models or faster training:
+
+```bash
+# FSDP (Fully Sharded Data Parallel)
+accelerate launch --multi_gpu --num_processes 2 train.py
+
+# DeepSpeed ZeRO-2/3
+accelerate launch --use_deepspeed train.py
+```
+
+### H100 vs A100 Performance Comparison
+
+| Optimization | A100 Speed | H100 Speed | H100 Advantage |
+|--------------|------------|------------|----------------|
+| FP32 baseline | 1.0x | 1.5x | 1.5x |
+| BF16 | 2.0x | 3.0x | 1.5x |
+| FP8 | N/A | 4-6x | 2x over BF16 |
+| FP8 + compile | N/A | 6-9x | Best case |
+
+### Quick Optimization Checklist
+
+```bash
+# Apply these for optimal training on H100:
+NUM_WORKERS=8 \
+PIN_MEMORY=true \
+GRADIENT_CHECKPOINTING=true \
+    bash train_script.sh
+```
+
+| Setting | A100 | H100 |
+|---------|------|------|
+| Mixed Precision | BF16 | BF16 (or FP8 if supported) |
+| Num Workers | 8-16 | 8-16 |
+| Pin Memory | true | true |
+| TF32 | Enable | Enable |
+| Flash Attention | Enable | Enable |
+
+### References
+
+- [HuggingFace Accelerate FP8 Guide](https://huggingface.co/docs/accelerate/en/usage_guides/low_precision_training)
+- [NVIDIA Transformer Engine](https://github.com/NVIDIA/TransformerEngine)
+- [PyTorch TorchAO](https://github.com/pytorch/ao)
+- [PyTorch Performance Tuning Guide](https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html)
 
 ---
 
