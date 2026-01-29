@@ -118,13 +118,19 @@ This guide covers setting up cloud GPU instances for training SmolVLA, Pi0.5, an
   - [GPU Acceleration Methods for VLA Training](#gpu-acceleration-methods-for-vla-training)
     - [Mixed Precision Training](#mixed-precision-training)
     - [FP8 Training (H100 Only)](#fp8-training-h100-only)
+      - [FP8 Support Status](#fp8-support-status)
+      - [Enabling FP8 with Accelerate](#enabling-fp8-with-accelerate)
+      - [TorchAO FP8 (Alternative)](#torchao-fp8-alternative)
     - [DataLoader Optimization](#dataloader-optimization)
     - [Memory Optimization](#memory-optimization)
+      - [Gradient Checkpointing](#gradient-checkpointing)
+      - [Pre-cache Dataset to RAM](#pre-cache-dataset-to-ram)
     - [torch.compile (A100/H100)](#torchcompile-a100h100)
     - [TensorFloat32 (TF32)](#tensorfloat32-tf32)
     - [Multi-GPU Training](#multi-gpu-training)
     - [H100 vs A100 Performance Comparison](#h100-vs-a100-performance-comparison)
     - [Quick Optimization Checklist](#quick-optimization-checklist)
+    - [References](#references)
   - [Cost Optimization Tips](#cost-optimization-tips)
   - [Quick Reference](#quick-reference)
     - [SmolVLA Key Parameters](#smolvla-key-parameters)
@@ -1463,6 +1469,8 @@ ACCELERATE_MIXED_PRECISION=fp8 NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/works
 
 NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=24 MAX_STEPS=20000  bash custom/scripts/cloud/train_groot_bimanual.sh
 
+RESUME_FROM=outputs/groot16_bimanual_20260129_122806/checkpoint-4000 NUM_WORKERS=8 SAVE_TOTAL_LIMIT=4 SAVE_STEPS=2500 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=24 MAX_STEPS=20000 bash custom/scripts/cloud/train_groot_bimanual.sh 
+
 DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=24 \
@@ -1979,10 +1987,35 @@ FP8 provides up to **2x speedup over BF16** on H100 GPUs with ~30% memory reduct
 | Model | FP8 Support | How to Enable |
 |-------|-------------|---------------|
 | **GROOT 1.6** | Not native yet | Requires code modification |
-| **SmolVLA** | Via Accelerate | `accelerate launch --mixed_precision fp8` |
+| **SmolVLA** | **Ready-to-use script** | `bash train_smolvla_bimanual_fp8.sh` |
 | **Pi0.5** | Via torchao | `torch.compile` + FP8 recipe |
 
-#### Enabling FP8 with Accelerate
+#### SmolVLA FP8 Training (H100)
+
+We provide a ready-to-use FP8 training script for SmolVLA:
+
+```bash
+# Install FP8 dependencies
+pip install transformer-engine[pytorch]
+
+# Run FP8 training (H100 only)
+bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+
+# With custom batch size (FP8 allows ~30% larger batches)
+BATCH_SIZE=160 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+
+# Use torchao backend instead of TransformerEngine
+FP8_BACKEND=torchao bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+```
+
+**FP8 vs BF16 Batch Sizes (H100 80GB):**
+
+| Precision | Batch Size | Memory | Speed |
+|-----------|------------|--------|-------|
+| BF16 | 128 | ~70GB | 1.0x |
+| **FP8** | **160-200** | ~55GB | **1.5-2x** |
+
+#### Enabling FP8 with Accelerate (Manual)
 
 ```bash
 # Install TransformerEngine
