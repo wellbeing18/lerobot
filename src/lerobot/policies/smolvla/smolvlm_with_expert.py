@@ -506,13 +506,16 @@ class SmolVLMWithExpertModel(nn.Module):
                     att_out = att_output[:, start:end]
                     out_emb = layer.self_attn.o_proj(att_out)
 
-                    out_emb += hidden_states
+                    # Use non-in-place addition for FP8 compatibility
+                    # (FP8 layers return views that can't be modified in-place)
+                    out_emb = out_emb + hidden_states
                     after_first_residual = out_emb.clone()
 
                     out_emb = layer.post_attention_layernorm(out_emb)
                     out_emb = layer.mlp(out_emb)
 
-                    out_emb += after_first_residual
+                    # Use non-in-place addition for FP8 compatibility
+                    out_emb = out_emb + after_first_residual
 
                     outputs_embeds.append(out_emb)
 
@@ -567,7 +570,8 @@ class SmolVLMWithExpertModel(nn.Module):
         key_states = key_states.transpose(1, 2)
 
         att_weights = torch.matmul(query_states, key_states.transpose(2, 3))
-        att_weights *= head_dim**-0.5
+        # Use non-in-place for FP8 compatibility
+        att_weights = att_weights * (head_dim**-0.5)
 
         att_weights = att_weights.to(dtype=torch.float32)
         big_neg = torch.finfo(att_weights.dtype).min  # -2.3819763e38  # See gemma/modules.py
