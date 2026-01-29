@@ -1166,6 +1166,8 @@ ls /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464/meta/
 
 # === STEP 3: CONVERT TO GROOT FORMAT ===
 # LeRobot v3.0 -> GROOT v2.1 (per-episode parquet + modality.json)
+# Install lerobot (required for conversion script)
+pip install lerobot
 
 python custom/scripts/cloud/convert_bimanual_to_groot.py \
     --input /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
