@@ -508,14 +508,16 @@ class SmolVLMWithExpertModel(nn.Module):
 
                     # Use non-in-place addition for FP8 compatibility
                     # (FP8 layers return views that can't be modified in-place)
-                    out_emb = out_emb + hidden_states
+                    # Preserve dtype to avoid float32 promotion during addition
+                    target_dtype = out_emb.dtype
+                    out_emb = (out_emb + hidden_states).to(target_dtype)
                     after_first_residual = out_emb.clone()
 
                     out_emb = layer.post_attention_layernorm(out_emb)
                     out_emb = layer.mlp(out_emb)
 
                     # Use non-in-place addition for FP8 compatibility
-                    out_emb = out_emb + after_first_residual
+                    out_emb = (out_emb + after_first_residual).to(target_dtype)
 
                     outputs_embeds.append(out_emb)
 

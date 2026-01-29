@@ -1472,7 +1472,7 @@ FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/pickn
 
 FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 BATCH_SIZE=160 MAX_STEPS=40000 NUM_WORKERS=20 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
 
-FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 BATCH_SIZE=128 MAX_STEPS=40000 NUM_WORKERS=20 LOG_FREQ=10 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+
 
 ```bash
 # On LOCAL machine - download checkpoints
@@ -2021,24 +2021,26 @@ The FP8 script uses torchao's direct API injection to convert Linear layers to F
 
 **Run FP8 Training:**
 
-```bash
-# FP8 training with torchao (H100 80GB)
-FP8_BACKEND=torchao \
-DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
-DATASET_NAME=picknplace-bimanual-464 \
-BATCH_SIZE=160 \
-MAX_STEPS=40000 \
-NUM_WORKERS=20 \
-LOG_FREQ=10 \
-    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
-```
-
 **Installation (if torchao not installed):**
 
 ```bash
 # Install from PyTorch wheel index (NOT PyPI) for version compatibility
 pip install torchao --index-url https://download.pytorch.org/whl/cu126
 ```
+
+```bash
+# FP8 training with torchao (H100 80GB)
+GRADIENT_CHECKPOINTING=false FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 BATCH_SIZE=128 MAX_STEPS=40000 NUM_WORKERS=20 LOG_FREQ=10 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+```
+
+<!-- 
+fp16:
+batch: 64, gradient_checkpoint: false, updt_s:0.841 data_s:0.019
+
+fp8:
+batch: 128, gradient_checkpoint: true, updt_s:6.233 data_s:3.294
+
+ -->
 
 **Performance Comparison (H100 80GB):**
 
