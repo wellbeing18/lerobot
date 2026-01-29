@@ -119,7 +119,8 @@ This guide covers setting up cloud GPU instances for training SmolVLA, Pi0.5, an
     - [Mixed Precision Training](#mixed-precision-training)
     - [FP8 Training (H100 Only)](#fp8-training-h100-only)
       - [FP8 Support Status](#fp8-support-status)
-      - [Enabling FP8 with Accelerate](#enabling-fp8-with-accelerate)
+      - [SmolVLA FP8 Training (H100)](#smolvla-fp8-training-h100)
+      - [Enabling FP8 with Accelerate (Manual)](#enabling-fp8-with-accelerate-manual)
       - [TorchAO FP8 (Alternative)](#torchao-fp8-alternative)
     - [DataLoader Optimization](#dataloader-optimization)
     - [Memory Optimization](#memory-optimization)
@@ -895,99 +896,99 @@ Epochs = (steps × batch_size) / total_frames
 
 #### SmolVLA Commands for Vast.ai
 
+See [Alternative: Use Fork with Training Script](#alternative-use-fork-with-training-script) below for complete setup instructions.
+
+#### SmolVLA FP8 Training (H100 Only)
+
+FP8 mixed precision provides **1.5-2x speedup** and **~30% memory reduction** on H100 GPUs.
+
+**Step 1: Install FP8 Dependencies**
+
 ```bash
-# === STEP 1: SETUP (run once after SSH) ===
+# Install TransformerEngine (recommended for H100)
+pip install transformer-engine[pytorch]
 
-# 1.1 Clone LeRobot
-git clone https://github.com/huggingface/lerobot.git
-cd lerobot
-
-# 1.2 Fix PyTorch version conflict (IMPORTANT!)
-# Vast.ai PyTorch template has torch 2.10.0 but LeRobot requires torch<2.8.0
-# Uninstall pre-installed packages first to avoid torchaudio conflict
-pip uninstall -y torch torchvision torchaudio
-
-# 1.3 Install LeRobot with SmolVLA dependencies
-pip install -e ".[smolvla]"
-
-# 1.4 Verify installation
-nvidia-smi
-python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}, CUDA: {torch.version.cuda}')"
-
-# === STEP 2: START TRAINING ===
-
-# OPTION A: Let LeRobot download automatically (SIMPLEST - RECOMMENDED)
-# No pre-download needed - LeRobot will download and cache the dataset automatically.
-# This is the simplest approach and works correctly on any cloud instance.
-
-# Choose ONE command based on your GPU.
-# Key settings for Vision+Expert mode (recommended for bimanual):
-#   --policy.freeze_vision_encoder=false  (unfreeze vision for spatial learning)
-#   --policy.train_expert_only=true       (keep language model frozen)
-
-# --- A100 80GB: batch=128, 35K steps (~37 epochs), ~2.5-3 hrs, ~$2-3 ---
-# Same command as above, but change:
-#   --batch_size=128
-#   --steps=35000
-#   --policy.scheduler_decay_steps=35000
-
-# --- H100 80GB: batch=128, 30K steps (~32 epochs), ~1.5-2 hrs, ~$3-4 ---
-# Same command as above, but change:
-#   --batch_size=128
-
-# === STEP 3: MONITOR TRAINING ===
-
-# In another terminal (or use tmux/screen):
-watch -n 1 nvidia-smi              # GPU utilization
-tail -f outputs/smolvla_bimanual/training.log  # Training progress
+# Or use torchao (alternative)
+# pip install torchao
 ```
 
-**Note:** The dataset `jasmine314342/picknplace-bimanual-464` is public - no HuggingFace login required.
+**Step 2: Verify H100 GPU**
 
-**Camera Mapping:** The `--rename_map` parameter maps your bimanual camera names to SmolVLA's expected names:
-- `head` → `camera1`
-- `left_wrist` → `camera2`
-- `right_wrist` → `camera3`
+```bash
+nvidia-smi --query-gpu=name --format=csv,noheader
+# Should show: NVIDIA H100 80GB HBM3
+```
+
+**Step 3: Run FP8 Training**
+
+```bash
+# FP8 training with larger batch size (H100 80GB)
+DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
+DATASET_NAME=picknplace-bimanual-464 \
+GRADIENT_CHECKPOINTING=false \
+BATCH_SIZE=128 \
+MAX_STEPS=40000 \
+NUM_WORKERS=20 \
+    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+```
+
+**FP8 vs BF16 Comparison (H100 80GB):**
+
+| Precision | Batch Size | Speed | Training Time (40K steps) | Cost |
+|-----------|------------|-------|---------------------------|------|
+| BF16 | 64 | ~4-5 it/s | ~2.5-3 hrs | ~$4-5 |
+| **FP8** | **128** | **~6-8 it/s** | **~1.5-2 hrs** | **~$3-4** |
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FP8_BACKEND` | `TE` | FP8 backend: `TE` (TransformerEngine) or `torchao` |
+| `BATCH_SIZE` | `128` | Larger than BF16 due to memory savings |
+| `GRADIENT_CHECKPOINTING` | `true` | Can disable on H100 for speed |
 
 #### Alternative: Use Fork with Training Script
 
 If you prefer using a forked LeRobot repo (e.g., with local modifications like gradient checkpointing):
 
 ```bash
-# === ON THE CLOUD INSTANCE (after SSH) ===
+# === STEP 1: SETUP (run once after SSH) ===
 
-# 1. Clone your forked repo instead of upstream
+# Clone your forked repo instead of upstream
 git clone https://github.com/wellbeing18/lerobot.git
 cd lerobot
 
-# 2. Fix PyTorch version conflict
+# Fix PyTorch version conflict and install
 pip uninstall -y torch torchvision torchaudio
 pip install -e ".[smolvla]"
 
-# 3. Run training (LeRobot downloads dataset automatically)
-# No HF_HOME needed - LeRobot handles caching correctly
+# For FP8 training (H100 only), also install:
+pip install transformer-engine[pytorch]
 
-# RTX 4090 (24GB)
-GRADIENT_CHECKPOINTING=true BATCH_SIZE=48 MAX_STEPS=60000 \
-    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
+# === STEP 2: RUN TRAINING ===
 
-# A100 40GB
-GRADIENT_CHECKPOINTING=false BATCH_SIZE=48 MAX_STEPS=60000 NUM_WORKERS=16 \
-    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
-
-# A100 80GB
+# --- A100 40GB: BF16, batch=64 ---
 GRADIENT_CHECKPOINTING=false BATCH_SIZE=64 MAX_STEPS=50000 NUM_WORKERS=20 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
-# H100 80GB (FASTEST)
-GRADIENT_CHECKPOINTING=false BATCH_SIZE=64 MAX_STEPS=50000 NUM_WORKERS=20 \
+# --- A100 80GB: BF16, batch=96 ---
+GRADIENT_CHECKPOINTING=false BATCH_SIZE=96 MAX_STEPS=50000 NUM_WORKERS=20 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 
-# Or use local dataset path (if pre-downloaded)
+# --- H100 80GB: BF16, batch=128 ---
 DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
 DATASET_NAME=picknplace-bimanual-464 \
-GRADIENT_CHECKPOINTING=false BATCH_SIZE=64 MAX_STEPS=50000 NUM_WORKERS=20 \
+GRADIENT_CHECKPOINTING=false BATCH_SIZE=128 MAX_STEPS=50000 NUM_WORKERS=20 \
     bash jdocs/scripts/bimanual/train_smolvla_bimanual.sh
+
+# --- H100 80GB: FP8, batch=128 (FASTEST, ~1.5-2x speedup) ---
+DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
+DATASET_NAME=picknplace-bimanual-464 \
+GRADIENT_CHECKPOINTING=false \
+BATCH_SIZE=128 \
+MAX_STEPS=40000 \
+NUM_WORKERS=20 \
+    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
 ```
 
 **Why use a fork?**
@@ -1163,19 +1164,7 @@ ls /workspace/Isaac-GR00T/datasets/bimanual_groot/meta/
 
 # Choose ONE command based on your GPU:
 
-# --- RTX 4090 (24GB): Default mode only, batch=8, ~2.3-3.5 hrs, ~$0.6-0.9 ---
-# (Cannot use Vision+DiT - not enough VRAM)
-DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
-GLOBAL_BATCH_SIZE=8 \
-MAX_STEPS=10000 \
-    bash custom/scripts/cloud/train_groot_bimanual.sh
-
-# --- A100 40GB: Vision+DiT, batch=16, ~1.8-2.8 hrs, ~$1.2-1.8 (RECOMMENDED) ---
-DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
-TUNE_VISUAL=true \
-GLOBAL_BATCH_SIZE=16 \
-MAX_STEPS=10000 \
-    bash custom/scripts/cloud/train_groot_bimanual.sh
+NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=24 MAX_STEPS=20000  bash custom/scripts/cloud/train_groot_bimanual.sh
 
 # --- A100 80GB: Vision+DiT, batch=32, ~1.4-1.8 hrs, ~$1.3-1.7 ---
 DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
