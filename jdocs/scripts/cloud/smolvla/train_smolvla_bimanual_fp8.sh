@@ -170,7 +170,6 @@ fp8_config:
   fp8_format: HYBRID
   amax_history_len: 1024
   amax_compute_algo: max
-  override_linear_precision: false
 EOF
 else
     cat > "${ACCELERATE_CONFIG_FILE}" << EOF
