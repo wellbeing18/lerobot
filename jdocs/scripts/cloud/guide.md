@@ -168,39 +168,38 @@ bash jdocs/scripts/cloud/pi05/train_pi05_bimanual.sh
 
 ### GROOT 1.6
 
-GROOT requires a separate repo (Isaac-GR00T) and dataset conversion to v2.1 format.
+GROOT requires a separate repo (Isaac-GR00T), Python 3.10, and dataset conversion to v2.1 format.
 
-**Option A: One-command setup (recommended)**
 ```bash
-# SSH to cloud instance, then run setup script
-curl -sSL https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh | bash
-```
-
-**Option B: Manual setup**
-```bash
-# 1. Clone forked Isaac-GR00T repo
+# 1. Clone forked Isaac-GR00T repo (with bimanual cloud scripts)
 git clone --branch lora/reusable-groot-workflow-rtx5090-fixes \
-    https://github.com/wellbeing18/Isaac-GR00T.git
-cd Isaac-GR00T
+    https://github.com/wellbeing18/Isaac-GR00T.git /workspace/Isaac-GR00T
+cd /workspace/Isaac-GR00T
+
+# 2. Setup Python 3.10 environment (GROOT requires Python 3.10.*)
+conda create -n groot python=3.10 -y
+conda activate groot
+
+# 3. Install dependencies (flash-attn requires specific order)
+pip install torch==2.7.0
+pip install numpy psutil ninja
+pip install flash-attn==2.7.4.post1 --no-build-isolation
 pip install -e .
-pip install jsonlines pyav
+pip install jsonlines av huggingface_hub
 
-# 2. Download dataset from HuggingFace
-pip install huggingface_hub
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('jasmine314342/picknplace-bimanual-464',
-                  repo_type='dataset', local_dir='./datasets_lerobot/picknplace-bimanual-464')
-"
+# 4. Download dataset from HuggingFace Hub
+python custom/scripts/cloud/download_hf_dataset.py \
+    --repo-id jasmine314342/picknplace-bimanual-464 \
+    --output ./datasets_lerobot
 
-# 3. Convert to GROOT format
+# 5. Convert LeRobot v3.0 -> GROOT v2.1 format
 python custom/scripts/cloud/convert_bimanual_to_groot.py \
     --input ./datasets_lerobot/picknplace-bimanual-464 \
     --output ./datasets/bimanual_groot
 
-# 4. Start training (A100 40GB recommended)
+# 6. Start training (A100 40GB recommended)
 DATASET_PATH=./datasets/bimanual_groot \
-TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 \
+TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 MAX_STEPS=10000 \
     bash custom/scripts/cloud/train_groot_bimanual.sh
 ```
 
@@ -910,39 +909,6 @@ python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}, CUDA: {to
 #   --policy.freeze_vision_encoder=false  (unfreeze vision for spatial learning)
 #   --policy.train_expert_only=true       (keep language model frozen)
 
-# --- A100 40GB (RECOMMENDED): batch=96, 30K steps (~24 epochs), ~3-4 hrs, ~$2-3 ---
-python -m lerobot.scripts.lerobot_train \
-    --dataset.repo_id=jasmine314342/picknplace-bimanual-464 \
-    --dataset.video_backend=pyav \
-    --policy.path=lerobot/smolvla_base \
-    --policy.device=cuda \
-    --policy.chunk_size=50 \
-    --policy.n_action_steps=50 \
-    --policy.num_steps=10 \
-    --policy.freeze_vision_encoder=false \
-    --policy.train_expert_only=true \
-    --policy.train_state_proj=true \
-    --policy.optimizer_lr=1e-4 \
-    --policy.optimizer_weight_decay=1e-10 \
-    --policy.optimizer_grad_clip_norm=10.0 \
-    --policy.scheduler_warmup_steps=1000 \
-    --policy.scheduler_decay_steps=30000 \
-    --policy.scheduler_decay_lr=2.5e-6 \
-    --batch_size=96 \
-    --steps=30000 \
-    --save_freq=5000 \
-    --log_freq=100 \
-    --num_workers=8 \
-    --seed=1000 \
-    --output_dir=outputs/smolvla_bimanual \
-    --job_name=smolvla_bimanual \
-    --wandb.enable=false \
-    '--rename_map={"observation.images.head":"observation.images.camera1","observation.images.left_wrist":"observation.images.camera2","observation.images.right_wrist":"observation.images.camera3"}'
-
-# --- RTX 4090 (24GB): batch=48, 30K steps (~13 epochs), ~8-10 hrs, ~$2-3 ---
-# Same command as above, but change:
-#   --batch_size=48
-
 # --- A100 80GB: batch=128, 35K steps (~37 epochs), ~2.5-3 hrs, ~$2-3 ---
 # Same command as above, but change:
 #   --batch_size=128
@@ -1123,70 +1089,121 @@ GRADIENT_CHECKPOINTING=true \
 **Important:** GROOT uses a separate repo (Isaac-GR00T) and requires dataset conversion from LeRobot v3.0 to GROOT v2.1 format.
 
 ```bash
-# === OPTION 1: ONE-COMMAND SETUP (recommended) ===
-# Downloads repo, dataset, converts, and trains automatically
-curl -sSL https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh | bash
+# === STEP 1: SETUP (run once after SSH) ===
 
-# Or with custom parameters:
-curl -sSL https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh | \
-    TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 MAX_STEPS=10000 bash
-
-# === OPTION 2: MANUAL SETUP ===
-
-# Step 1: Clone forked Isaac-GR00T repo (with bimanual support)
+# 1.1 Clone forked Isaac-GR00T repo (with bimanual cloud scripts)
 git clone --branch lora/reusable-groot-workflow-rtx5090-fixes \
     https://github.com/wellbeing18/Isaac-GR00T.git /workspace/Isaac-GR00T
 cd /workspace/Isaac-GR00T
+
+# 1.2 Create Python 3.10 environment (GROOT requires Python 3.10.*)
+# Check current Python version first:
+python --version  # If already 3.10.x, skip conda steps
+
+# If Python is NOT 3.10.x, create conda environment:
+conda create -n groot python=3.10 -y
+conda activate groot
+
+# 1.3 Install dependencies (in correct order for flash-attn)
+# flash-attn requires torch + build deps installed FIRST
+pip install torch==2.7.0
+pip install numpy psutil ninja
+pip install flash-attn==2.7.4.post1 --no-build-isolation
+
+# Now install GROOT and other deps
 pip install -e .
-pip install jsonlines pyav huggingface_hub
+pip install jsonlines av huggingface_hub
 
-# Verify GPU
+# 1.4 Verify GPU
 nvidia-smi
+python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}, CUDA: {torch.version.cuda}')"
 
-# Step 2: Download dataset from HuggingFace Hub
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('jasmine314342/picknplace-bimanual-464',
-                  repo_type='dataset',
-                  local_dir='/workspace/datasets_lerobot/picknplace-bimanual-464',
-                  local_dir_use_symlinks=False)
-print('Download complete!')
-"
+# === STEP 2: DOWNLOAD DATASET (skip if already cached) ===
+# If you already trained SmolVLA on this instance, dataset is cached at:
+#   /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464
+# Otherwise, download it:
 
-# Step 3: Convert LeRobot v3.0 -> GROOT v2.1 format
+python custom/scripts/cloud/download_hf_dataset.py \
+    --repo-id jasmine314342/picknplace-bimanual-464 \
+    --output /workspace/datasets_lerobot
+
+# === STEP 3: CONVERT TO GROOT FORMAT ===
+# LeRobot v3.0 -> GROOT v2.1 (per-episode parquet + modality.json)
+
+# If using HF cache (from SmolVLA training):
 python custom/scripts/cloud/convert_bimanual_to_groot.py \
-    --input /workspace/datasets_lerobot/picknplace-bimanual-464 \
+    --input /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
     --output /workspace/Isaac-GR00T/datasets/bimanual_groot
 
-# === TRAINING COMMANDS ===
+# OR if you downloaded in Step 2:
+# python custom/scripts/cloud/convert_bimanual_to_groot.py \
+#     --input /workspace/datasets_lerobot/picknplace-bimanual-464 \
+#     --output /workspace/Isaac-GR00T/datasets/bimanual_groot
 
-# RTX 4090 (24GB) - Default mode only, batch=8, ~2.3-3.5 hrs, ~$0.6-0.9
+# Verify conversion
+ls /workspace/Isaac-GR00T/datasets/bimanual_groot/meta/
+
+# === STEP 4: START TRAINING ===
+
+# Choose ONE command based on your GPU:
+
+# --- RTX 4090 (24GB): Default mode only, batch=8, ~2.3-3.5 hrs, ~$0.6-0.9 ---
 # (Cannot use Vision+DiT - not enough VRAM)
 DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 GLOBAL_BATCH_SIZE=8 \
+MAX_STEPS=10000 \
     bash custom/scripts/cloud/train_groot_bimanual.sh
 
-# A100 40GB - Vision+DiT, batch=16, ~1.8-2.8 hrs, ~$1.2-1.8 (RECOMMENDED)
+# --- A100 40GB: Vision+DiT, batch=16, ~1.8-2.8 hrs, ~$1.2-1.8 (RECOMMENDED) ---
 DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=16 \
+MAX_STEPS=10000 \
     bash custom/scripts/cloud/train_groot_bimanual.sh
 
-# A100 80GB - Vision+DiT, batch=32, ~1.4-1.8 hrs, ~$1.3-1.7
+# --- A100 80GB: Vision+DiT, batch=32, ~1.4-1.8 hrs, ~$1.3-1.7 ---
 DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=32 \
+MAX_STEPS=10000 \
     bash custom/scripts/cloud/train_groot_bimanual.sh
 
-# H100 80GB - Vision+DiT, batch=32, ~0.8-1.1 hrs, ~$1.4-1.9
+# --- H100 80GB: Vision+DiT, batch=32, ~0.8-1.1 hrs, ~$1.4-1.9 ---
 DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=32 \
+MAX_STEPS=10000 \
     bash custom/scripts/cloud/train_groot_bimanual.sh
 
-# === DOWNLOAD CHECKPOINTS ===
+# === STEP 5: MONITOR TRAINING ===
+
+# In another terminal (or use tmux):
+watch -n 1 nvidia-smi                                    # GPU utilization
+tail -f outputs/groot16_bimanual_*/training.log          # Training progress
+
+# === STEP 6: DOWNLOAD CHECKPOINTS ===
 # From your LOCAL machine after training:
 scp -r root@<instance-ip>:/workspace/Isaac-GR00T/outputs/groot16_bimanual_*/checkpoint-* ./
+```
+
+**Alternative: One-Command Setup Script**
+
+If you prefer a single command that does everything (clone, download, convert, train):
+
+```bash
+# Download and run setup script
+cd /workspace
+curl -O https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh
+chmod +x setup_groot_bimanual.sh
+
+# Run with default settings (downloads dataset, converts, trains)
+bash setup_groot_bimanual.sh
+
+# Or with custom settings (A100 40GB recommended)
+TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 MAX_STEPS=10000 bash setup_groot_bimanual.sh
+
+# Or setup only (no training) - useful for debugging
+SKIP_TRAINING=true bash setup_groot_bimanual.sh
 ```
 
 ### Vast.ai Cost Summary
@@ -1430,6 +1447,18 @@ RESUME_FROM=outputs/smolvla_bimanual_xxx/checkpoints/checkpoint-20000 \
 
 ```bash
 # On LOCAL machine - download checkpoints
+rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/lerobot/outputs/smolvla_bimanual_20260128_231825/checkpoints/036000/pretrained_model ./36000
+
+ACCELERATE_MIXED_PRECISION=fp8 NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=32 MAX_STEPS=20000  bash custom/scripts/cloud/train_groot_bimanual.sh
+
+NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=24 MAX_STEPS=20000  bash custom/scripts/cloud/train_groot_bimanual.sh
+
+DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
+TUNE_VISUAL=true \
+GLOBAL_BATCH_SIZE=24 \
+MAX_STEPS=20000 \
+    bash custom/scripts/cloud/train_groot_bimanual.sh
+
 rsync -avz --progress \
     user@vast-instance:/root/lerobot/outputs/*/checkpoints \
     ./checkpoints_backup/
