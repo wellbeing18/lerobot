@@ -168,9 +168,40 @@ bash jdocs/scripts/cloud/pi05/train_pi05_bimanual.sh
 
 ### GROOT 1.6
 
+GROOT requires a separate repo (Isaac-GR00T) and dataset conversion to v2.1 format.
+
+**Option A: One-command setup (recommended)**
 ```bash
-# Same steps 1-3, plus Isaac-GR00T setup, then:
-bash jdocs/scripts/cloud/groot16/train_groot16_bimanual.sh
+# SSH to cloud instance, then run setup script
+curl -sSL https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh | bash
+```
+
+**Option B: Manual setup**
+```bash
+# 1. Clone forked Isaac-GR00T repo
+git clone --branch lora/reusable-groot-workflow-rtx5090-fixes \
+    https://github.com/wellbeing18/Isaac-GR00T.git
+cd Isaac-GR00T
+pip install -e .
+pip install jsonlines pyav
+
+# 2. Download dataset from HuggingFace
+pip install huggingface_hub
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('jasmine314342/picknplace-bimanual-464',
+                  repo_type='dataset', local_dir='./datasets_lerobot/picknplace-bimanual-464')
+"
+
+# 3. Convert to GROOT format
+python custom/scripts/cloud/convert_bimanual_to_groot.py \
+    --input ./datasets_lerobot/picknplace-bimanual-464 \
+    --output ./datasets/bimanual_groot
+
+# 4. Start training (A100 40GB recommended)
+DATASET_PATH=./datasets/bimanual_groot \
+TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 \
+    bash custom/scripts/cloud/train_groot_bimanual.sh
 ```
 
 ---
@@ -1089,48 +1120,73 @@ GRADIENT_CHECKPOINTING=true \
 
 #### GROOT 1.6 Commands for Vast.ai
 
-```bash
-# === SETUP (run once after SSH) ===
-git clone https://github.com/huggingface/lerobot.git
-cd lerobot
-pip install -e ".[groot]"
+**Important:** GROOT uses a separate repo (Isaac-GR00T) and requires dataset conversion from LeRobot v3.0 to GROOT v2.1 format.
 
-# Install Isaac-GR00T (required)
-pip install isaac-groot
+```bash
+# === OPTION 1: ONE-COMMAND SETUP (recommended) ===
+# Downloads repo, dataset, converts, and trains automatically
+curl -sSL https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh | bash
+
+# Or with custom parameters:
+curl -sSL https://raw.githubusercontent.com/wellbeing18/Isaac-GR00T/lora/reusable-groot-workflow-rtx5090-fixes/custom/scripts/cloud/setup_groot_bimanual.sh | \
+    TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 MAX_STEPS=10000 bash
+
+# === OPTION 2: MANUAL SETUP ===
+
+# Step 1: Clone forked Isaac-GR00T repo (with bimanual support)
+git clone --branch lora/reusable-groot-workflow-rtx5090-fixes \
+    https://github.com/wellbeing18/Isaac-GR00T.git /workspace/Isaac-GR00T
+cd /workspace/Isaac-GR00T
+pip install -e .
+pip install jsonlines pyav huggingface_hub
 
 # Verify GPU
 nvidia-smi
 
-# === CONVERT DATASET (one-time) ===
-python jdocs/scripts/cloud/groot16/convert_lerobot_to_groot.py \
-    --input ./datasets/picknplace-bimanual-464 \
-    --output ./datasets/picknplace_groot
+# Step 2: Download dataset from HuggingFace Hub
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('jasmine314342/picknplace-bimanual-464',
+                  repo_type='dataset',
+                  local_dir='/workspace/datasets_lerobot/picknplace-bimanual-464',
+                  local_dir_use_symlinks=False)
+print('Download complete!')
+"
+
+# Step 3: Convert LeRobot v3.0 -> GROOT v2.1 format
+python custom/scripts/cloud/convert_bimanual_to_groot.py \
+    --input /workspace/datasets_lerobot/picknplace-bimanual-464 \
+    --output /workspace/Isaac-GR00T/datasets/bimanual_groot
 
 # === TRAINING COMMANDS ===
 
 # RTX 4090 (24GB) - Default mode only, batch=8, ~2.3-3.5 hrs, ~$0.6-0.9
 # (Cannot use Vision+DiT - not enough VRAM)
-DATASET_PATH=./datasets/picknplace_groot \
+DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 GLOBAL_BATCH_SIZE=8 \
-    bash jdocs/scripts/cloud/groot16/train_groot16_bimanual.sh
+    bash custom/scripts/cloud/train_groot_bimanual.sh
 
 # A100 40GB - Vision+DiT, batch=16, ~1.8-2.8 hrs, ~$1.2-1.8 (RECOMMENDED)
-DATASET_PATH=./datasets/picknplace_groot \
+DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=16 \
-    bash jdocs/scripts/cloud/groot16/train_groot16_bimanual.sh
+    bash custom/scripts/cloud/train_groot_bimanual.sh
 
 # A100 80GB - Vision+DiT, batch=32, ~1.4-1.8 hrs, ~$1.3-1.7
-DATASET_PATH=./datasets/picknplace_groot \
+DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=32 \
-    bash jdocs/scripts/cloud/groot16/train_groot16_bimanual.sh
+    bash custom/scripts/cloud/train_groot_bimanual.sh
 
 # H100 80GB - Vision+DiT, batch=32, ~0.8-1.1 hrs, ~$1.4-1.9
-DATASET_PATH=./datasets/picknplace_groot \
+DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot \
 TUNE_VISUAL=true \
 GLOBAL_BATCH_SIZE=32 \
-    bash jdocs/scripts/cloud/groot16/train_groot16_bimanual.sh
+    bash custom/scripts/cloud/train_groot_bimanual.sh
+
+# === DOWNLOAD CHECKPOINTS ===
+# From your LOCAL machine after training:
+scp -r root@<instance-ip>:/workspace/Isaac-GR00T/outputs/groot16_bimanual_*/checkpoint-* ./
 ```
 
 ### Vast.ai Cost Summary
@@ -1656,15 +1712,32 @@ BATCH_SIZE=64 MAX_STEPS=100000 \
 
 ### GROOT 1.6 Training
 
-```bash
-# First, convert dataset to GROOT format
-python jdocs/scripts/cloud/groot16/convert_lerobot_to_groot.py \
-    --input ./datasets_bimanuel/multitasks \
-    --output ./datasets/multitasks_groot
+**Note:** GROOT uses a separate repo (Isaac-GR00T) with its own scripts. See [GROOT 1.6 on Vast.ai](#groot-16-on-vastai) for full setup.
 
-# Then train
-DATASET_PATH=./datasets/multitasks_groot \
-    bash jdocs/scripts/cloud/groot16/train_groot16_bimanual.sh
+```bash
+# From Isaac-GR00T repo (NOT lerobot repo)
+cd /workspace/Isaac-GR00T  # or ~/Isaac-GR00T locally
+
+# One-command setup (downloads dataset, converts, trains)
+bash custom/scripts/cloud/setup_groot_bimanual.sh
+
+# Or manual steps:
+# 1. Download dataset from HuggingFace
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('jasmine314342/picknplace-bimanual-464',
+                  repo_type='dataset', local_dir='./datasets_lerobot/picknplace-bimanual-464')
+"
+
+# 2. Convert to GROOT format
+python custom/scripts/cloud/convert_bimanual_to_groot.py \
+    --input ./datasets_lerobot/picknplace-bimanual-464 \
+    --output ./datasets/bimanual_groot
+
+# 3. Train (A100 40GB with Vision+DiT recommended)
+DATASET_PATH=./datasets/bimanual_groot \
+TUNE_VISUAL=true GLOBAL_BATCH_SIZE=16 \
+    bash custom/scripts/cloud/train_groot_bimanual.sh
 ```
 
 ---
@@ -1887,9 +1960,15 @@ WARMUP_STEPS=2000 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `LEARNING_RATE` | 1e-4 | Learning rate |
-| `BATCH_SIZE` | 8 | Batch size (24GB GPU) |
+| `GLOBAL_BATCH_SIZE` | 8 | Batch size (8 for 24GB, 16-32 for 40GB+) |
 | `MAX_STEPS` | 10000 | Training steps |
 | `WARMUP_RATIO` | 0.05 | Warmup fraction |
+| `TUNE_VISUAL` | false | Unfreeze vision encoder (needs 40GB+) |
+| `TUNE_LLM` | false | Unfreeze LLM backbone (needs 80GB+) |
+| `TUNE_PROJECTOR` | true | Train projector layers |
+| `TUNE_DIFFUSION` | true | Train DiT action head |
+
+**Repository:** https://github.com/wellbeing18/Isaac-GR00T (branch: `lora/reusable-groot-workflow-rtx5090-fixes`)
 
 ---
 
@@ -1899,7 +1978,11 @@ After training completes:
 
 1. **Download checkpoint** to local machine
    ```bash
+   # SmolVLA/Pi0.5 (from lerobot outputs)
    rsync -avz user@cloud:outputs/smolvla_bimanual_cloud_*/checkpoints ./checkpoints/
+
+   # GROOT (from Isaac-GR00T outputs)
+   rsync -avz user@cloud:/workspace/Isaac-GR00T/outputs/groot16_bimanual_*/checkpoint-* ./checkpoints/
    ```
 
 2. **Run inference test**
@@ -1911,6 +1994,10 @@ After training completes:
    # Pi0.5
    python jdocs/scripts/cloud/pi05/infer_pi05_bimanual.py \
        --checkpoint ./checkpoints/checkpoint-50000
+
+   # GROOT (from Isaac-GR00T repo)
+   python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
+       --checkpoint ./checkpoints/checkpoint-10000
    ```
 
 3. **Push to HuggingFace Hub** (optional)
