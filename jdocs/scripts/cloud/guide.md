@@ -1154,26 +1154,21 @@ nvidia-smi
 python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}, CUDA: {torch.version.cuda}')"
 
 # === STEP 2: DOWNLOAD DATASET (skip if already cached) ===
-# If you already trained SmolVLA on this instance, dataset is cached at:
-#   /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464
-# Otherwise, download it:
+# Download to HF cache location so convert script can find it
 
 python custom/scripts/cloud/download_hf_dataset.py \
     --repo-id jasmine314342/picknplace-bimanual-464 \
-    --output /workspace/datasets_lerobot
+    --output /workspace/.hf_home/lerobot/jasmine314342
+
+# Verify download
+ls /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464/meta/
 
 # === STEP 3: CONVERT TO GROOT FORMAT ===
 # LeRobot v3.0 -> GROOT v2.1 (per-episode parquet + modality.json)
 
-# If using HF cache (from SmolVLA training):
 python custom/scripts/cloud/convert_bimanual_to_groot.py \
     --input /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
     --output /workspace/Isaac-GR00T/datasets/bimanual_groot
-
-# OR if you downloaded in Step 2:
-# python custom/scripts/cloud/convert_bimanual_to_groot.py \
-#     --input /workspace/datasets_lerobot/picknplace-bimanual-464 \
-#     --output /workspace/Isaac-GR00T/datasets/bimanual_groot
 
 # Verify conversion
 ls /workspace/Isaac-GR00T/datasets/bimanual_groot/meta/
