@@ -61,6 +61,7 @@ This guide covers setting up cloud GPU instances for training SmolVLA, Pi0.5, an
       - [Memory \& Batch Size Configuration](#memory--batch-size-configuration)
       - [Training Time \& Cost (30,000 steps recommended)](#training-time--cost-30000-steps-recommended)
       - [SmolVLA Commands for Vast.ai](#smolvla-commands-for-vastai)
+      - [SmolVLA FP8 Training (H100 Only)](#smolvla-fp8-training-h100-only)
       - [Alternative: Use Fork with Training Script](#alternative-use-fork-with-training-script)
     - [Pi0.5 on Vast.ai](#pi05-on-vastai)
       - [Memory \& Batch Size Configuration](#memory--batch-size-configuration-1)
@@ -1453,6 +1454,10 @@ RESUME_FROM=outputs/smolvla_bimanual_xxx/checkpoints/checkpoint-20000 \
 ```bash
 # On LOCAL machine - download checkpoints
 rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/lerobot/outputs/smolvla_bimanual_20260128_231825/checkpoints/036000/pretrained_model ./36000
+
+rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/Isaac-GR00T/outputs/groot16_bimanual_20260129_145515/checkpoint-17500 ./checkpoint-17500
+
+rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/Isaac-GR00T/outputs/groot16_bimanual_20260129_145515/checkpoint-15000 ./checkpoint-15000
 
 ACCELERATE_MIXED_PRECISION=fp8 NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=32 MAX_STEPS=20000  bash custom/scripts/cloud/train_groot_bimanual.sh
 
