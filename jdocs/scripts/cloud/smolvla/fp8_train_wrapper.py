@@ -141,16 +141,9 @@ def main():
     from lerobot.utils.utils import init_logging
     from lerobot.scripts.lerobot_train import update_policy
 
-    # Parse arguments
-    args = sys.argv[1:]
-
-    # Use lerobot's parser
-    @parser.wrap()
-    def get_config(cfg: TrainPipelineConfig):
-        return cfg
-
-    # Parse config
-    cfg = get_config(args)
+    # Parse config using draccus (same as lerobot's parser does internally)
+    import draccus
+    cfg = draccus.parse(config_class=TrainPipelineConfig, args=sys.argv[1:])
     cfg.validate()
 
     # Create accelerator with BF16 base (FP8 injected via torchao)

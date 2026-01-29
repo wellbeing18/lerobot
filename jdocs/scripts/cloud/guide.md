@@ -1488,7 +1488,7 @@ RESUME_FROM=outputs/smolvla_bimanual_xxx/checkpoints/checkpoint-20000 \
 
 FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 GRADIENT_CHECKPOINTING=false BATCH_SIZE=128 MAX_STEPS=40000 NUM_WORKERS=20 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
 
-FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 GRADIENT_CHECKPOINTING=false BATCH_SIZE=96  MAX_STEPS=40000  NUM_WORKERS=20 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 BATCH_SIZE=160 MAX_STEPS=40000 NUM_WORKERS=20 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
 
 ```bash
 # On LOCAL machine - download checkpoints
