@@ -130,21 +130,144 @@ fi
 echo ""
 echo "Checking FP8 dependencies..."
 
+# Get PyTorch version and CUDA version for compatibility check
+TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null)
+echo "  PyTorch: ${TORCH_VERSION}"
+echo "  CUDA: ${CUDA_VERSION}"
+
+# Determine CUDA wheel suffix (cu126, cu128, etc.)
+CUDA_SUFFIX="cu126"
+if [[ "${CUDA_VERSION}" == 12.8* ]]; then
+    CUDA_SUFFIX="cu128"
+elif [[ "${CUDA_VERSION}" == 12.9* ]]; then
+    CUDA_SUFFIX="cu129"
+fi
+echo "  Wheel index: ${CUDA_SUFFIX}"
+
+install_torchao() {
+    echo ""
+    echo "Installing torchao from PyTorch wheel index (not PyPI)..."
+    echo "  This ensures compatibility with PyTorch ${TORCH_VERSION}"
+
+    # IMPORTANT: Install from PyTorch wheel index, not PyPI
+    # PyPI wheels may not match the exact PyTorch/CUDA version
+    pip uninstall -y torchao 2>/dev/null || true
+    pip install torchao --index-url "https://download.pytorch.org/whl/${CUDA_SUFFIX}"
+
+    # Verify installation
+    if python -c "import torchao; print(f'torchao {torchao.__version__} installed')" 2>/dev/null; then
+        echo "  torchao: OK"
+        return 0
+    else
+        echo "  torchao: Installation from wheel index failed, trying nightly..."
+        pip install --pre torchao --index-url "https://download.pytorch.org/whl/nightly/${CUDA_SUFFIX}"
+        if python -c "import torchao" 2>/dev/null; then
+            echo "  torchao (nightly): OK"
+            return 0
+        fi
+        return 1
+    fi
+}
+
+install_te() {
+    echo ""
+    echo "Installing TransformerEngine..."
+
+    # Try pip install first
+    pip install transformer-engine[pytorch]
+
+    # Verify installation
+    if python -c "import transformer_engine; print(f'TransformerEngine installed')" 2>/dev/null; then
+        echo "  TransformerEngine: OK"
+        return 0
+    else
+        echo "  TransformerEngine: Installation failed"
+        echo "  Note: TransformerEngine may require building from source for PyTorch ${TORCH_VERSION}"
+        return 1
+    fi
+}
+
+# Install based on selected backend
 if [ "${FP8_BACKEND}" = "TE" ]; then
     if python -c "import transformer_engine" 2>/dev/null; then
-        echo "  TransformerEngine: OK"
+        echo "  TransformerEngine: OK (already installed)"
     else
-        echo "  TransformerEngine: NOT FOUND"
-        echo "  Installing: pip install transformer-engine[pytorch]"
-        pip install transformer-engine[pytorch]
+        if ! install_te; then
+            echo ""
+            echo "WARNING: TransformerEngine installation failed."
+            echo "         Falling back to torchao backend..."
+            FP8_BACKEND="torchao"
+            install_torchao || {
+                echo ""
+                echo "ERROR: Both FP8 backends failed to install."
+                echo "       Please use BF16 training instead:"
+                echo "       bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh"
+                exit 1
+            }
+        fi
     fi
 elif [ "${FP8_BACKEND}" = "torchao" ]; then
-    if python -c "import torchao" 2>/dev/null; then
-        echo "  torchao: OK"
+    # Check if torchao is already installed AND compatible
+    TORCHAO_OK=$(python -c "
+import warnings
+warnings.filterwarnings('ignore')
+try:
+    import torchao
+    from torchao.float8 import convert_to_float8_training
+    print('OK')
+except Exception as e:
+    print(f'FAIL: {e}')
+" 2>&1)
+
+    if [[ "${TORCHAO_OK}" == "OK" ]]; then
+        echo "  torchao: OK (already installed and compatible)"
     else
-        echo "  torchao: NOT FOUND"
-        echo "  Installing: pip install torchao"
-        pip install torchao
+        echo "  torchao status: ${TORCHAO_OK}"
+        install_torchao || {
+            echo ""
+            echo "ERROR: torchao installation failed."
+            echo "       Please use BF16 training instead:"
+            echo "       bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh"
+            exit 1
+        }
+    fi
+fi
+
+# =============================================================================
+# Verify FP8 Backend Works
+# =============================================================================
+
+echo ""
+echo "Verifying FP8 backend..."
+
+if [ "${FP8_BACKEND}" = "torchao" ]; then
+    FP8_TEST=$(python -c "
+import warnings
+warnings.filterwarnings('ignore')
+try:
+    import torch
+    from torchao.float8 import convert_to_float8_training, Float8LinearConfig
+    # Quick test
+    model = torch.nn.Linear(32, 32).cuda()
+    config = Float8LinearConfig()
+    convert_to_float8_training(model, config=config)
+    print('OK')
+except Exception as e:
+    print(f'FAIL: {e}')
+" 2>&1)
+
+    if [[ "${FP8_TEST}" == "OK" ]]; then
+        echo "  torchao FP8 test: PASSED"
+    else
+        echo "  torchao FP8 test: FAILED"
+        echo "  Error: ${FP8_TEST}"
+        echo ""
+        echo "WARNING: torchao FP8 not working. Falling back to BF16..."
+        echo "         Using standard training script instead."
+        echo ""
+        # Fall back to BF16 script
+        exec bash "$(dirname "$0")/train_smolvla_bimanual.sh"
     fi
 fi
 
@@ -172,13 +295,38 @@ fp8_config:
   amax_compute_algo: max
 EOF
 else
-    cat > "${ACCELERATE_CONFIG_FILE}" << EOF
+    # Use MSAMP as a workaround if torchao backend isn't recognized by accelerate
+    # Check accelerate version and torchao backend support
+    ACCELERATE_HAS_TORCHAO=$(python -c "
+try:
+    from accelerate.utils import FP8BackendType
+    print('torchao' if hasattr(FP8BackendType, 'TORCHAO') else 'no')
+except:
+    print('no')
+" 2>/dev/null)
+
+    if [ "${ACCELERATE_HAS_TORCHAO}" = "torchao" ]; then
+        cat > "${ACCELERATE_CONFIG_FILE}" << EOF
 compute_environment: LOCAL_MACHINE
 distributed_type: 'NO'
 mixed_precision: fp8
 fp8_config:
-  backend: torchao
+  backend: TORCHAO
 EOF
+    else
+        echo "  WARNING: accelerate doesn't recognize torchao backend"
+        echo "  Using direct torchao API instead of accelerate FP8..."
+
+        # Create BF16 config - we'll inject FP8 manually via torchao
+        cat > "${ACCELERATE_CONFIG_FILE}" << EOF
+compute_environment: LOCAL_MACHINE
+distributed_type: 'NO'
+mixed_precision: bf16
+EOF
+
+        # Set flag to use direct torchao injection
+        USE_DIRECT_TORCHAO="true"
+    fi
 fi
 
 echo "  FP8 Backend: ${FP8_BACKEND}"
@@ -213,13 +361,11 @@ echo "============================================================"
 echo ""
 
 # =============================================================================
-# Build Training Command with Accelerate
+# Build Training Command
 # =============================================================================
 
-# Use accelerate launch with FP8 config
-CMD="accelerate launch --config_file ${ACCELERATE_CONFIG_FILE} \
-    -m lerobot.scripts.lerobot_train \
-    ${DATASET_ARG} \
+# Common training arguments
+TRAIN_ARGS="${DATASET_ARG} \
     --dataset.video_backend=pyav \
     --policy.path=${PRETRAINED_MODEL} \
     --policy.device=cuda \
@@ -247,13 +393,28 @@ CMD="accelerate launch --config_file ${ACCELERATE_CONFIG_FILE} \
     --job_name=smolvla_bimanual_fp8"
 
 # Camera name mapping
-CMD="${CMD} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\",\"observation.images.right_wrist\":\"observation.images.camera3\"}"
+TRAIN_ARGS="${TRAIN_ARGS} --rename_map={\"observation.images.head\":\"observation.images.camera1\",\"observation.images.left_wrist\":\"observation.images.camera2\",\"observation.images.right_wrist\":\"observation.images.camera3\"}"
 
 # W&B logging
 if [ "${WANDB_ENABLE}" = "true" ]; then
-    CMD="${CMD} --wandb.enable=true --wandb.project=${WANDB_PROJECT}"
+    TRAIN_ARGS="${TRAIN_ARGS} --wandb.enable=true --wandb.project=${WANDB_PROJECT}"
 else
-    CMD="${CMD} --wandb.enable=false"
+    TRAIN_ARGS="${TRAIN_ARGS} --wandb.enable=false"
+fi
+
+# Build command based on FP8 method
+if [ "${USE_DIRECT_TORCHAO}" = "true" ]; then
+    echo ""
+    echo "Using direct torchao FP8 injection (accelerate backend not available)..."
+    echo ""
+
+    # Use the FP8 wrapper script which injects FP8 directly via torchao API
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    CMD="python ${SCRIPT_DIR}/fp8_train_wrapper.py ${TRAIN_ARGS}"
+else
+    # Use accelerate launch with FP8 config
+    CMD="accelerate launch --config_file ${ACCELERATE_CONFIG_FILE} \
+        -m lerobot.scripts.lerobot_train ${TRAIN_ARGS}"
 fi
 
 # =============================================================================

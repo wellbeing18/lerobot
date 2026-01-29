@@ -901,9 +901,40 @@ See [Alternative: Use Fork with Training Script](#alternative-use-fork-with-trai
 
 #### SmolVLA FP8 Training (H100 Only)
 
-FP8 mixed precision provides **1.5-2x speedup** and **~30% memory reduction** on H100 GPUs.
+> **⚠️ FP8 Version Compatibility Warning:**
+>
+> FP8 training requires specific PyTorch/CUDA version combinations that may not be available on all cloud instances:
+> - **TransformerEngine**: Requires specific PyTorch versions (often fails with PyTorch 2.7+)
+> - **torchao**: Requires matching PyTorch versions (0.15.0 incompatible with torch 2.7.1)
+>
+> **Recommendation:** Use **BF16 training** (standard script) which works reliably on all instances. H100 with BF16 is already ~1.5-2x faster than A100. The additional FP8 gains (~1.3x over BF16) are often not worth the version compatibility issues.
 
-**Step 1: Install FP8 Dependencies**
+**Recommended: BF16 Training on H100**
+
+```bash
+# H100 80GB with BF16 (RECOMMENDED - reliable, fast)
+DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
+DATASET_NAME=picknplace-bimanual-464 \
+GRADIENT_CHECKPOINTING=false \
+BATCH_SIZE=128 \
+MAX_STEPS=40000 \
+NUM_WORKERS=20 \
+    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
+```
+
+**Optional: FP8 Training (if versions are compatible)**
+
+FP8 mixed precision provides **1.3-1.5x speedup** over BF16 and **~30% memory reduction** on H100 GPUs, but requires specific versions:
+
+**Step 1: Check PyTorch Version**
+
+```bash
+python -c "import torch; print(torch.__version__)"
+# FP8 works best with PyTorch 2.3-2.5
+# PyTorch 2.7+ may have compatibility issues
+```
+
+**Step 2: Install FP8 Dependencies (if compatible)**
 
 ```bash
 # Install TransformerEngine (recommended for H100)
@@ -911,13 +942,6 @@ pip install transformer-engine[pytorch]
 
 # Or use torchao (alternative)
 # pip install torchao
-```
-
-**Step 2: Verify H100 GPU**
-
-```bash
-nvidia-smi --query-gpu=name --format=csv,noheader
-# Should show: NVIDIA H100 80GB HBM3
 ```
 
 **Step 3: Run FP8 Training**
@@ -933,12 +957,12 @@ NUM_WORKERS=20 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
 ```
 
-**FP8 vs BF16 Comparison (H100 80GB):**
+**Performance Comparison (H100 80GB):**
 
-| Precision | Batch Size | Speed | Training Time (40K steps) | Cost |
-|-----------|------------|-------|---------------------------|------|
-| BF16 | 64 | ~4-5 it/s | ~2.5-3 hrs | ~$4-5 |
-| **FP8** | **128** | **~6-8 it/s** | **~1.5-2 hrs** | **~$3-4** |
+| Precision | Batch Size | Speed | Training Time (40K steps) | Reliability |
+|-----------|------------|-------|---------------------------|-------------|
+| **BF16** | **128** | **~5-6 it/s** | **~2-2.5 hrs** | **High (recommended)** |
+| FP8 | 160+ | ~7-8 it/s | ~1.5-2 hrs | Requires specific versions |
 
 **Environment Variables:**
 
@@ -982,11 +1006,22 @@ DATASET_NAME=picknplace-bimanual-464 \
 GRADIENT_CHECKPOINTING=false BATCH_SIZE=128 MAX_STEPS=50000 NUM_WORKERS=20 \
     bash jdocs/scripts/bimanual/train_smolvla_bimanual.sh
 
-# --- H100 80GB: FP8, batch=128 (FASTEST, ~1.5-2x speedup) ---
+# --- H100 80GB: BF16, batch=128 (RECOMMENDED - reliable) ---
 DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
 DATASET_NAME=picknplace-bimanual-464 \
 GRADIENT_CHECKPOINTING=false \
 BATCH_SIZE=128 \
+MAX_STEPS=40000 \
+NUM_WORKERS=20 \
+    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual.sh
+
+# --- H100 80GB: FP8, batch=160 (OPTIONAL - requires specific PyTorch versions) ---
+# Note: FP8 may fail with PyTorch 2.7+ due to TransformerEngine/torchao compatibility issues
+# Only use if you've verified your PyTorch version is compatible (2.3-2.5 recommended)
+DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
+DATASET_NAME=picknplace-bimanual-464 \
+GRADIENT_CHECKPOINTING=false \
+BATCH_SIZE=160 \
 MAX_STEPS=40000 \
 NUM_WORKERS=20 \
     bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
@@ -1451,13 +1486,17 @@ RESUME_FROM=outputs/smolvla_bimanual_xxx/checkpoints/checkpoint-20000 \
 
 #### Download Checkpoints Before Instance Ends
 
+FP8_BACKEND=torchao DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 DATASET_NAME=picknplace-bimanual-464 GRADIENT_CHECKPOINTING=false BATCH_SIZE=128 MAX_STEPS=40000 NUM_WORKERS=20 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+
+
+
 ```bash
 # On LOCAL machine - download checkpoints
 rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/lerobot/outputs/smolvla_bimanual_20260128_231825/checkpoints/036000/pretrained_model ./36000
 
 rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/Isaac-GR00T/outputs/groot16_bimanual_20260129_145515/checkpoint-17500 ./checkpoint-17500
 
-rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/Isaac-GR00T/outputs/groot16_bimanual_20260129_145515/checkpoint-15000 ./checkpoint-15000
+rsync -avz --progress -e "ssh -p 17686 -i ~/.ssh/id_ed25519" root@ssh9.vast.ai:/workspace/Isaac-GR00T/outputs/groot16_bimanual_20260129_145515/checkpoint-20000 ./checkpoint-20000
 
 ACCELERATE_MIXED_PRECISION=fp8 NUM_WORKERS=8 PIN_MEMORY=true DATASET_PATH=/workspace/Isaac-GR00T/datasets/bimanual_groot TUNE_VISUAL=true GLOBAL_BATCH_SIZE=32 MAX_STEPS=20000  bash custom/scripts/cloud/train_groot_bimanual.sh
 
@@ -1974,59 +2013,71 @@ grep -i "bf16\|bfloat" training.log
 
 ### FP8 Training (H100 Only)
 
-FP8 provides up to **2x speedup over BF16** on H100 GPUs with ~30% memory reduction.
+FP8 provides up to **1.5x speedup over BF16** on H100 GPUs with ~30% memory reduction.
+
+> **Important:** FP8 requires specific version combinations. The updated FP8 script now handles this automatically.
 
 #### FP8 Support Status
 
-| Model | FP8 Support | How to Enable |
-|-------|-------------|---------------|
-| **GROOT 1.6** | Not native yet | Requires code modification |
-| **SmolVLA** | **Ready-to-use script** | `bash train_smolvla_bimanual_fp8.sh` |
-| **Pi0.5** | Via torchao | `torch.compile` + FP8 recipe |
+| Model | FP8 Support | How to Enable | Notes |
+|-------|-------------|---------------|-------|
+| **GROOT 1.6** | Not native yet | Requires code modification | N/A |
+| **SmolVLA** | **Ready-to-use script** | `bash train_smolvla_bimanual_fp8.sh` | Auto-installs deps |
+| **Pi0.5** | Via torchao | `torch.compile` + FP8 recipe | Manual setup |
 
 #### SmolVLA FP8 Training (H100)
 
-We provide a ready-to-use FP8 training script for SmolVLA:
+The FP8 script now automatically:
+- Detects PyTorch/CUDA versions
+- Installs torchao from the correct wheel index (not PyPI)
+- Falls back to direct torchao API if accelerate backend fails
+- Falls back to BF16 if FP8 setup fails completely
+
+**Run FP8 Training:**
 
 ```bash
-# Install FP8 dependencies
-pip install transformer-engine[pytorch]
-
-# Run FP8 training (H100 only)
-bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
-
-# With custom batch size (FP8 allows ~30% larger batches)
-BATCH_SIZE=160 bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
-
-# Use torchao backend instead of TransformerEngine
-FP8_BACKEND=torchao bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
+# FP8 training with torchao (recommended for H100)
+FP8_BACKEND=torchao \
+DATASET_PATH=/workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464 \
+DATASET_NAME=picknplace-bimanual-464 \
+BATCH_SIZE=160 \
+MAX_STEPS=40000 \
+    bash jdocs/scripts/cloud/smolvla/train_smolvla_bimanual_fp8.sh
 ```
 
-**FP8 vs BF16 Batch Sizes (H100 80GB):**
+**FP8 Installation (handled automatically by script):**
 
-| Precision | Batch Size | Memory | Speed |
-|-----------|------------|--------|-------|
-| BF16 | 128 | ~70GB | 1.0x |
-| **FP8** | **160-200** | ~55GB | **1.5-2x** |
+```bash
+# IMPORTANT: Install torchao from PyTorch wheel index, NOT PyPI
+# This ensures compatibility with your PyTorch/CUDA version
+pip install torchao --index-url https://download.pytorch.org/whl/cu126
+
+# For nightly versions (if stable doesn't work):
+pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+```
+
+**Performance Comparison (H100 80GB):**
+
+| Precision | Batch Size | Memory | Speed | Notes |
+|-----------|------------|--------|-------|-------|
+| BF16 | 128 | ~70GB | 1.0x | Reliable baseline |
+| **FP8** | **160-200** | **~55GB** | **1.3-1.5x** | Requires correct setup |
 
 #### Enabling FP8 with Accelerate (Manual)
 
 ```bash
-# Install TransformerEngine
+# Option 1: TransformerEngine backend
 pip install transformer-engine[pytorch]
 
-# Method 1: Accelerate config (interactive)
-accelerate config
-# Select: fp8 for mixed precision
-# Select: TE (TransformerEngine) as backend
+# Option 2: torchao backend (install from PyTorch wheel index!)
+pip install torchao --index-url https://download.pytorch.org/whl/cu126
 
-# Method 2: Command line
+# Run with accelerate
+accelerate config  # Select fp8, then TE or torchao backend
 accelerate launch --mixed_precision fp8 your_training_script.py
-
-# Method 3: Config YAML (~/.cache/huggingface/accelerate/default_config.yaml)
 ```
 
-Example accelerate config for FP8:
+Example accelerate config for FP8 with TransformerEngine:
 
 ```yaml
 compute_environment: LOCAL_MACHINE
@@ -2039,18 +2090,31 @@ fp8_config:
   amax_compute_algo: max
 ```
 
-#### TorchAO FP8 (Alternative)
+#### TorchAO FP8 (Direct API)
 
-```bash
-pip install torchao
-```
+If accelerate's FP8 backend doesn't work, use torchao's direct API:
 
 ```python
-from torchao.float8 import convert_to_float8_training
+from torchao.float8 import convert_to_float8_training, Float8LinearConfig
 
-model = convert_to_float8_training(model)
-model = torch.compile(model)  # Required for speedup!
+# Configure FP8 (tensorwise is fastest)
+config = Float8LinearConfig.from_recipe_name("tensorwise")
+
+# Convert model layers to FP8
+def module_filter_fn(mod, fqn):
+    # Skip layers with dimensions not divisible by 16
+    if isinstance(mod, torch.nn.Linear):
+        if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
+            return False
+    return True
+
+convert_to_float8_training(model, config=config, module_filter_fn=module_filter_fn)
+
+# IMPORTANT: torch.compile is required for FP8 speedup!
+model = torch.compile(model)
 ```
+
+The SmolVLA FP8 script includes a wrapper (`fp8_train_wrapper.py`) that does this automatically.
 
 ### DataLoader Optimization
 
