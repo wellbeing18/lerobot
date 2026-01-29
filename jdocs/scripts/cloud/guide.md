@@ -1154,13 +1154,14 @@ nvidia-smi
 python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}, CUDA: {torch.version.cuda}')"
 
 # === STEP 2: DOWNLOAD DATASET (skip if already cached) ===
-# Download to HF cache location so convert script can find it
+# Download to local directory for convert script
+# The script appends dataset name to output path automatically
 
 python custom/scripts/cloud/download_hf_dataset.py \
     --repo-id jasmine314342/picknplace-bimanual-464 \
     --output /workspace/.hf_home/lerobot/jasmine314342
 
-# Verify download
+# Verify download (dataset is at output_dir/dataset_name)
 ls /workspace/.hf_home/lerobot/jasmine314342/picknplace-bimanual-464/meta/
 
 # === STEP 3: CONVERT TO GROOT FORMAT ===
